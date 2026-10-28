@@ -63,6 +63,11 @@ resource "google_artifact_registry_repository" "apps" {
       older_than = "1209600s" # 14 days
     }
   }
+
+  # Without the images, Cloud Run can't start instances, scale up or roll back.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_artifact_registry_repository_iam_member" "builder_push" {

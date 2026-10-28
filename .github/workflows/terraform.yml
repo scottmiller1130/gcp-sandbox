@@ -1,18 +1,25 @@
 name: Terraform
 
-# Infrastructure as a pipeline:
+# Infrastructure changes, with customer experience first:
 #
-#   pull request   plan platform, dev and prod (read-only identity) and post the
-#                  plans on the PR for review
-#   merge to main  apply in order: platform -> dev -> prod (stops at the first failure)
-#   Mondays        drift check: plan everything, fail if the cloud no longer
-#                  matches the code (someone changed something by hand)
+#   pull request   plan platform, dev and prod (read-only identity) -> risk review:
+#                  every change explained in plain English with a risk level,
+#                  customer impact, rollback and how to verify it, posted as one
+#                  PR comment. CRITICAL changes fail the check until someone adds
+#                  the `risk-accepted` label.
+#   merge to main  for each layer in order (platform -> dev -> prod):
+#                  plan -> re-score that exact plan -> refuse if CRITICAL without
+#                  sign-off -> apply the saved plan -> check the live site.
+#                  The first failure stops the rest, so a change that hurts dev
+#                  never reaches prod.
+#   Mondays        drift check: fail if the cloud no longer matches the code.
 #
 # The bootstrap layer is deliberately not here: it creates CI's own identities,
-# so a human applies it.
+# so a human applies it. See docs/terraform.md.
 on:
   pull_request:
-    paths: [terraform/**, .github/workflows/terraform.yml]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths: [terraform/**, scripts/tf_risk.py, .github/workflows/terraform.yml]
   push:
     branches: [main]
     paths: [terraform/**, .github/workflows/terraform.yml]
@@ -31,7 +38,10 @@ env:
 
 jobs:
   plan:
-    if: github.event_name != 'push'
+    # Label changes other than the sign-off label don't need a new plan.
+    if: >-
+      github.event_name != 'push' &&
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled' || github.event.label.name == 'risk-accepted')
     name: plan ${{ matrix.stack }}
     runs-on: ubuntu-latest
     strategy:
@@ -64,6 +74,7 @@ jobs:
           cat plan.txt
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
           [ "$code" -ne 1 ] # 0 = no changes, 2 = changes, 1 = error
+          terraform show -json tfplan > plan.json
 
       - name: Summarise
         if: always() && steps.plan.outcome != 'skipped'
@@ -77,19 +88,73 @@ jobs:
             tail -c 60000 plan.txt
             echo '```'
             echo '</details>'
-          } > summary.md
-          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Comment on the PR
-        if: always() && github.event_name == 'pull_request' && steps.plan.outcome != 'skipped'
-        uses: actions/github-script@v7
+      - name: Keep the plan for the risk review
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-${{ strategy.job-index }}
+          path: |
+            terraform/${{ matrix.stack }}/plan.json
+            terraform/${{ matrix.stack }}/plan.txt
+          retention-days: 7
+
+      - name: Fail on drift
+        if: github.event_name == 'schedule' && steps.plan.outputs.exitcode == '2'
+        run: |
+          echo "::error::Drift in ${{ matrix.stack }}: the cloud no longer matches the code. Review the plan above, then fix the code or re-apply."
+          exit 1
+
+  review:
+    if: github.event_name == 'pull_request' && needs.plan.result == 'success'
+    needs: plan
+    name: risk review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: plans
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r scripts/requirements-tf-risk.txt
+
+      - name: Find the previous review on this PR (reused when the code hasn't changed)
         env:
-          STACK: ${{ matrix.stack }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- tf-risk-review -->")) | .body' > prior.md || true
+
+      - name: Review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          git diff "origin/${{ github.base_ref }}...HEAD" -- terraform > tf.diff
+          # Matrix order: plan-0 = platform, plan-1 = envs/dev, plan-2 = envs/prod
+          python scripts/tf_risk.py review \
+            --plan "platform:shared:plans/plan-0/plan.json" \
+            --plan "envs/dev:dev:plans/plan-1/plan.json" \
+            --plan "envs/prod:prod:plans/plan-2/plan.json" \
+            --diff tf.diff --prior prior.md \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --labels "$LABELS" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --md comment.md --verdict verdict.json
+          sed '/tf-risk-verdict:/d' comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post the review on the PR
+        uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const marker = `<!-- terraform-plan:${process.env.STACK} -->`;
-            const body = `${marker}\n${fs.readFileSync('terraform/${{ matrix.stack }}/summary.md', 'utf8')}`;
+            const body = fs.readFileSync('comment.md', 'utf8');
+            const marker = '<!-- tf-risk-review -->';
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
             const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
@@ -100,11 +165,10 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
-      - name: Fail on drift
-        if: github.event_name == 'schedule' && steps.plan.outputs.exitcode == '2'
-        run: |
-          echo "::error::Drift in ${{ matrix.stack }}: the cloud no longer matches the code. Review the plan above, then fix the code or re-apply."
-          exit 1
+      - name: Gate on critical changes
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: python scripts/tf_risk.py gate --verdict verdict.json --labels "$LABELS"
 
   apply:
     if: github.event_name == 'push'
@@ -118,7 +182,10 @@ jobs:
       max-parallel: 1
       fail-fast: true
       matrix:
-        stack: [platform, envs/dev, envs/prod]
+        include:
+          - { stack: platform, env: shared }
+          - { stack: envs/dev, env: dev }
+          - { stack: envs/prod, env: prod }
     defaults:
       run:
         working-directory: terraform/${{ matrix.stack }}
@@ -127,9 +194,66 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.TF_APPLY_SA }}
       - run: terraform init
-      - run: terraform apply -auto-approve -no-color
+
+      - name: Plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -no-color -detailed-exitcode -out=tfplan
+          code=$?
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -ne 1 ]
+          terraform show -json tfplan > plan.json
+
+      - name: Find the pull request's review and sign-off
+        if: steps.plan.outputs.exitcode == '2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '.[0].number // empty')
+          echo "Pull request: ${pr:-none (direct push)}"
+          : > "$RUNNER_TEMP/prior.md"
+          : > "$RUNNER_TEMP/labels"
+          if [ -n "$pr" ]; then
+            gh api "repos/${{ github.repository }}/issues/$pr/comments" --paginate \
+              --jq '.[] | select(.body | startswith("<!-- tf-risk-review -->")) | .body' > "$RUNNER_TEMP/prior.md"
+            gh api "repos/${{ github.repository }}/issues/$pr/labels" --jq '[.[].name] | join(",")' > "$RUNNER_TEMP/labels"
+          fi
+
+      # Re-score the exact plan about to be applied. Changes that weren't in the
+      # reviewed PR plan count as at least HIGH; the AI's escalations carry over.
+      - name: Gate on critical changes
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          python "$GITHUB_WORKSPACE/scripts/tf_risk.py" review --no-ai \
+            --plan "${{ matrix.stack }}:${{ matrix.env }}:plan.json" \
+            --prior "$RUNNER_TEMP/prior.md" \
+            --md "$RUNNER_TEMP/review.md" --verdict "$RUNNER_TEMP/verdict.json"
+          sed '/tf-risk-verdict:/d' "$RUNNER_TEMP/review.md" >> "$GITHUB_STEP_SUMMARY"
+          python "$GITHUB_WORKSPACE/scripts/tf_risk.py" gate \
+            --verdict "$RUNNER_TEMP/verdict.json" --labels "$(cat "$RUNNER_TEMP/labels")"
+
+      # The saved plan: exactly what was gated, nothing that appeared since.
+      - name: Apply
+        if: steps.plan.outputs.exitcode == '2'
+        run: terraform apply -no-color tfplan
+
+      # Did customers notice? Hit the live service before moving to the next layer.
+      - name: Check the live site
+        if: matrix.env != 'shared'
+        run: |
+          url=$(terraform output -raw service_url)
+          echo "Checking $url"
+          "$GITHUB_WORKSPACE/scripts/verify.sh" "$url" 30 5 || {
+            echo "::error::${{ matrix.env }} is failing requests after this apply. Later layers were not applied. Revert the PR, or run the Rollback workflow if a release is at fault."
+            exit 1
+          }

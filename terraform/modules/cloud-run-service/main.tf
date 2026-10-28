@@ -131,6 +131,10 @@ resource "google_cloud_run_v2_service" "this" {
   }
 
   lifecycle {
+    # Deleting or replacing the service takes the site down. Terraform refuses
+    # outright; to really remove it, delete this line in a reviewed PR first.
+    prevent_destroy = true
+
     ignore_changes = [
       template[0].containers[0].image,
       template[0].containers[0].env,

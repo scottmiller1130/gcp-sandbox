@@ -13,6 +13,10 @@ updates:
     schedule:
       interval: weekly
   - package-ecosystem: terraform
-    directories: [/infra, /labs/*]
+    directories: [/terraform/bootstrap, /terraform/platform, /terraform/envs/*, /terraform/modules/*, /labs/*]
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: /scripts
     schedule:
       interval: weekly

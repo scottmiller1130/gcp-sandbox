@@ -42,6 +42,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: shellcheck scripts/*.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r scripts/requirements-tf-risk.txt
+      - name: Risk engine tests
+        run: python -W error::ResourceWarning -m unittest -v scripts/test_tf_risk.py
 
   terraform:
     runs-on: ubuntu-latest

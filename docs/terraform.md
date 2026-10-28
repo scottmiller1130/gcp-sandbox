@@ -63,15 +63,99 @@ shared project except the registry.
 ## Day-to-day: change infrastructure through a PR
 
 1. Branch, edit, e.g. set `max_instances = 5` in `terraform/envs/prod/main.tf`.
-2. Open a PR. **Terraform** plans `platform`, `dev` and `prod` and posts each plan as a
-   PR comment. **CI** runs `fmt`, `validate` and `tflint`.
-3. Review the plan, then merge. **Terraform** applies `platform` → `dev` → `prod` in order,
-   stopping at the first failure, so a change that breaks dev never reaches prod.
-4. Every Monday the drift check plans everything and **fails if the cloud doesn't match the
+2. Open a PR. **Terraform** plans `platform`, `dev` and `prod` and posts **one risk review
+   comment** (below). **CI** runs `fmt`, `validate`, `tflint` and the risk engine's tests.
+3. Read the review. If anything is 🔴 CRITICAL and intended, add the `risk-accepted` label.
+4. Merge. For each layer in order (`platform` → `dev` → `prod`), **Terraform** plans, re-scores
+   that exact plan, refuses to apply a CRITICAL change without sign-off, applies the saved plan,
+   then hits the live site. The first failure stops the rest, so a change that breaks dev never
+   reaches prod.
+5. Every Monday the drift check plans everything and **fails if the cloud doesn't match the
    code**, e.g. when someone changed something in the console.
 
 App code goes through a separate pipeline (**Deploy**), so infrastructure and releases
 don't block each other. See [cloud-run-app.md](cloud-run-app.md).
+
+## Change safety: the risk review
+
+Every infrastructure PR gets a comment like this, updated on each push:
+
+> ## 🛡️ Terraform change review
+> **Overall risk: 🟠 HIGH** · 3 changes (dev 1, prod 2) · AI: **⚠️ Merge with care**
+>
+> > Lowers prod's instance ceiling from 10 to 3 and tightens the startup probe…
+> >
+> > **Customer impact:** none until the next Deploy; after that, peak traffic above ~240
+> > concurrent requests would queue…
+>
+> | Risk | Env | Change | Customer impact |
+> |---|---|---|---|
+> | 🟠 HIGH | prod | Change Cloud Run service `hello-web` in prod. | … |
+>
+> Each change then has a section with **what happens**, **customer impact**, **why this risk**,
+> **rollback**, **verify after apply**, and the exact attributes changing (`old → new`).
+
+It's built in two layers, on purpose:
+
+| | Rules (`scripts/tf_risk.py`) | AI review (Claude Opus 5.5) |
+|---|---|---|
+| Decides | the risk *floor*, and **what's blocked** | explanations, customer impact, rollback, how to verify |
+| Can change a risk | sets it | can **raise** it, never lower it |
+| Deterministic | yes, and unit-tested (`scripts/test_tf_risk.py`) | no |
+| If unavailable | always runs | the review still posts, rules only |
+
+Rules are ordered by how directly customers feel a change:
+
+| Category | Examples | Typical risk |
+|---|---|---|
+| **Customer path** | the service, public access, image pulls, the app's secret, enabled APIs, the project | delete/replace: 🔴 CRITICAL · scaling down, probes, memory, identity: 🟠 HIGH |
+| **Delivery path** | keyless auth, CI identities, state access | breaking it: 🟠 HIGH, because you lose the fast way to fix customer problems |
+| **Observability** | uptime check, alerts, SLOs | delete: 🟡 MEDIUM, because problems could go unnoticed |
+| **Terraform state** | the state bucket | 🔴 CRITICAL, never lowered |
+| **Cost / maintenance / other** | budget, pruning job, dashboards | mostly 🟢 LOW |
+
+Dev changes are one level lower (it's pre-production), except state and CI plumbing. Broad role
+grants (`owner`, `editor`) are at least HIGH anywhere. Cloud Run changes also say **when
+customers get them**: right away (ingress, IAM, or traffic still on "latest"), or on the next
+Deploy through the canary gates (template changes once CI pins traffic).
+
+**What blocks:** any 🔴 CRITICAL change. The PR check fails and the apply refuses to run until
+the `risk-accepted` label is on the PR. GitHub Free can't *require* a passing check before
+merging a private repo, so the real enforcement is at apply time. The apply re-scores the plan
+it's about to run, carries over the AI's escalations from the PR review, and treats anything
+that wasn't in the reviewed plan as at least HIGH.
+
+**Hard stops that no label overrides:** the Cloud Run service and the image registry have
+`prevent_destroy`, so Terraform errors out on any plan that would delete or replace them.
+Removing that line is itself a reviewed change.
+
+**After every apply:** the live site in that environment gets 30 requests. More than 5% failing
+fails the job, so later layers (prod) aren't applied.
+
+### Setup
+
+```bash
+gh label create risk-accepted --color B60205 \
+  --description "Reviewed the CRITICAL changes in the Terraform risk review; apply anyway"
+gh secret set ANTHROPIC_API_KEY          # paste a key from console.anthropic.com
+```
+
+Without the secret, everything still works with rules only, and the comment says the AI review
+was skipped.
+
+**Cost:** the AI review runs once per push to a PR that changes infrastructure, and only when
+the plan has changes. Adding or removing the label reuses the existing review. A typical PR with a
+handful of changes is a few cents on Claude Opus 5.5 ($4 / $20 per million input/output tokens).
+The very first plan of everything (~100 resources) is closer to $0.50. This is billed by
+Anthropic, separately from the GCP free tier.
+
+**Data sent to the API:** the resource addresses, types, changed attributes and the Terraform diff
+of the PR. Values Terraform marks sensitive are replaced with `(sensitive)` before anything
+leaves the runner, and the admin token never appears in plans at all (write-only attribute).
+
+**Prompt injection:** PR content could try to talk the model into a low rating. It can't
+work, because the AI can only *raise* a risk above the rules' floor, and only the rules decide what
+blocks.
 
 ## Adding things
 
@@ -114,9 +198,11 @@ Then push. **Deploy** builds the app and releases it to dev and then prod.
 
 ## Tearing down
 
-Projects are created with `deletion_policy = "PREVENT"`, so `terraform destroy` can't
-delete an environment by accident. To remove one on purpose, set it to `"DELETE"` in
-`terraform/modules/project/main.tf` and apply. Then destroy in reverse order: envs → platform → bootstrap.
+Projects are created with `deletion_policy = "PREVENT"`, and the Cloud Run service and image
+registry have `prevent_destroy`, so `terraform destroy` can't delete an environment by accident.
+To remove one on purpose, in a reviewed PR first set `deletion_policy` to `"DELETE"` in
+`terraform/modules/project/main.tf` and delete the `prevent_destroy` lines, and apply that. Then
+destroy in reverse order: envs → platform → bootstrap.
 Deleted projects can be restored for 30 days.
 
 ## What a real enterprise adds on top

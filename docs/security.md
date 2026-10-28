@@ -17,7 +17,7 @@ Status: ✅ in place · 🔧 in progress · 📋 decision or document needed.
 
 | # | Severity | Finding | Fix | Status |
 |---|---|---|---|---|
-| 1 | High | No enforced change approval: private repo on GitHub Free (no branch protection or rulesets); every PR merged with 0 reviews | Public repo, then protected `main` with required reviews and checks, and a `prod` environment that needs approval | 🔧 |
+| 1 | High | No enforced change approval: private repo on GitHub Free (no branch protection or rulesets); every PR merged with 0 reviews | Repo public. `main` protected: PR + 6 required checks, 1 code-owner approval, stale approvals dismissed, the last push must be approved by someone else, no force-push. PRs are authored by the `gcp-sandbox-claude` GitHub App and approved by a human. `prod` environment gates deploys, applies and promotes | ✅ |
 | 2 | High | CI's plan identity (any branch) has `roles/viewer`, which includes `datastore.entities.get/list`: a PR's Terraform could read customer data | IAM deny policy on `datastore.entities.*` for `tf-plan` | 🔧 |
 | 3 | High | Default Compute service account has `roles/editor` in dev and prod (unused) | Deprivilege it in Terraform | 🔧 |
 | 4 | High | No alert notification channels: alerts and failed restore drills notify nobody | Email channel and log-based alerts | 🔧 |
@@ -39,6 +39,16 @@ Status: ✅ in place · 🔧 in progress · 📋 decision or document needed.
 | C1 / backup & recovery | Delete protection; nightly backup to a write-once vault in another project; nightly restore drill; `restore` command |
 | Cost | Cost gate on every PR; $1 budget alert |
 | Secrets | Secret Manager; admin token generated during apply and never written to state; nothing secret in the repository (gitleaks scan of full history: clean) |
+
+## Who does what
+
+| Actor | Can | Can't |
+|---|---|---|
+| `gcp-sandbox-claude-78tvq4[bot]` (GitHub App; Claude Code) | push branches, open PRs (1-hour tokens, this repo only) | approve, merge, change settings, reach other repos |
+| Code owner (@scottmiller1130) | approve and merge PRs, approve `prod` | push to `main` directly (protected) |
+| CI identities | plan (read-only), apply and deploy from `main` only | act from a branch, change the bootstrap layer |
+
+Rollback is a **pre-approved standard change**: it doesn't wait for the `prod` reviewer, so an incident is never blocked on a click.
 
 ## Change management: how a change is tracked, approved and logged
 

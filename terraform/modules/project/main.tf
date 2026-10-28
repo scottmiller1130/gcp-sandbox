@@ -64,6 +64,16 @@ resource "google_project_service" "this" {
   disable_on_destroy = false
 }
 
+# Compute Engine's default service account gets roles/editor automatically.
+# Nothing here runs as it, so take that away (it keeps existing, with no roles).
+resource "google_project_default_service_accounts" "this" {
+  count          = contains(var.services, "run.googleapis.com") ? 1 : 0
+  project        = google_project.this.project_id
+  action         = "DEPRIVILEGE"
+  restore_policy = "REVERT_AND_IGNORE_FAILURE"
+  depends_on     = [google_project_service.this]
+}
+
 resource "google_project_service_identity" "this" {
   provider   = google-beta
   for_each   = toset(var.service_identities)

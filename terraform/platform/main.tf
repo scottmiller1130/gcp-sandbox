@@ -48,6 +48,12 @@ resource "google_artifact_registry_repository" "apps" {
   description   = "Container images for sandbox apps (all environments)"
 
   # Free tier is 0.5 GB: keep enough images for rollbacks in every env, prune the rest.
+  # A tag, once pushed, always means the same bytes. Each build gets its own
+  # tag (<sha>-<run>-<attempt>), and deploys go by digest anyway.
+  docker_config {
+    immutable_tags = true
+  }
+
   cleanup_policy_dry_run = false
   cleanup_policies {
     id     = "keep-recent"

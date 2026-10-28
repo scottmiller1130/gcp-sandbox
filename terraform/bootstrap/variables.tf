@@ -46,3 +46,9 @@ variable "budget_usd" {
   type        = number
   default     = 1
 }
+
+variable "admin_email" {
+  description = "The human who applies bootstrap (granted Deny Admin). Kept out of the repo: set it in terraform.tfvars (git-ignored) or TF_VAR_admin_email."
+  type        = string
+  sensitive   = true
+}

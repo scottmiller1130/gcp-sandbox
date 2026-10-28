@@ -16,6 +16,15 @@ output "workload_identity_provider" {
   value = google_iam_workload_identity_pool_provider.github.name
 }
 
+output "ledger_bucket" {
+  value = google_storage_bucket.ledger.name
+}
+
+output "audit_archive" {
+  description = "Query in Logs Explorer: scope to this log bucket"
+  value       = google_logging_project_bucket_config.audit.id
+}
+
 output "backup_bucket" {
   value = google_storage_bucket.backups.name
 }
@@ -50,5 +59,6 @@ output "github_variables" {
     DEV_DEPLOYER_SA  = google_service_account.deployer["dev"].email
     PROD_PROJECT_ID  = module.projects["prod"].project_id
     PROD_DEPLOYER_SA = google_service_account.deployer["prod"].email
+    LEDGER_BUCKET    = google_storage_bucket.ledger.name
   }
 }

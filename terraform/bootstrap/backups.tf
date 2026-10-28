@@ -14,6 +14,8 @@
 # Nightly backups of the flight log are a few KB each.
 
 resource "google_storage_bucket" "backups" {
+  # checkov:skip=CKV_GCP_78:Versioning adds nothing here: the retention policy already stops any object being overwritten or deleted
+  # checkov:skip=CKV_GCP_62:Data Access audit logs on storage.googleapis.com record every read and write, with identity (stronger than access logs)
   project                     = var.shared_project_id
   name                        = "${var.shared_project_id}-backups"
   location                    = upper(var.region)

@@ -393,7 +393,7 @@ def billable_findings(base: Model, head: Model) -> list[dict]:
             if r.type == "google_logging_project_bucket_config":
                 days = re.search(r"retention_days\s*=\s*(\d+)", r.body)
                 if days and int(days.group(1)) > 30:
-                    found[key + ":retention"] = (0.5, "keeping logs past 30 days is billed per GiB-month")
+                    found[key + ":retention"] = (0.05, f"keeping logs {days.group(1)} days: storage past 30 days bills ~$0.01/GiB-month (audit logs are typically a few MB a month)")
         return found
 
     before = flagged(base)

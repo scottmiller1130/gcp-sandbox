@@ -44,11 +44,38 @@ Infrastructure layout and the Terraform pipeline are in [terraform.md](terraform
 
 | Path | Purpose |
 |---|---|
-| `/` | The web page. Shows version, revision and instance; each version has its own accent colour |
-| `/api/info` | Same as JSON. CI uses it to see which revision answered |
+| `/` | **Mission Control**: a live view of the service's internals (below) |
+| `/api/stats` | What this instance is doing: identity, uptime, requests, in-flight, status counts, latency, recent requests and log lines. Powers Mission Control |
+| `/api/info` | Version, revision and instance as JSON. CI uses it to see which revision answered |
 | `/work?ms=200` | Waits N ms (max 1000) before answering, so load tests can force scaling |
 | `/healthz` | Startup and liveness probe |
-| `/admin` | Instance internals (uptime, request count, memory). Needs the bearer token from Secret Manager |
+| `/admin` | Instance internals. Needs the bearer token from Secret Manager |
+| `/static/*`, `/theme.css` | Mission Control's script and styles, plus this version's accent colour |
+
+## Mission Control
+
+The homepage shows what's happening inside the service, live:
+
+- **Your request's journey**: a waterfall of your page load (DNS, TLS, Google's front end, the app's
+  own code, download). It comes from the browser's Navigation Timing plus the `Server-Timing: app;dur=…`
+  header every response carries. It also shows the request's Cloud Trace ID, with a link for project owners.
+- **Rollout radar**: which revision answered your last 40 polls. Watch it move 10% → 50% → 100% during a canary.
+- **Instance fleet**: one card per instance you've reached, with a friendly name, uptime, requests,
+  in-flight load (out of 80), latency, status counts and memory. Cards go to sleep when Cloud Run scales them in.
+- **Summon the swarm**: up to 100 parallel `/work` requests from your browser, with the result broken
+  down by the instances that answered.
+- **Live request feed** and **instance logs**: each instance keeps its last 60 requests and 40 log lines
+  in memory.
+- **Achievements**: for meeting two instances, catching a canary, seeing a cold start, and so on.
+
+**Privacy and safety:** the feed shows method, path and status only. Query values are dropped (except
+`/work?ms=`), and non-ASCII characters become `?`. Log lines keep an allow-list of attributes: no IPs,
+trace IDs or headers. The page renders everything with `textContent`, and the CSP allows scripts and
+styles only from the app's own files (`script-src 'self'`, no inline code).
+
+**Cost:** the page polls `/api/stats` every 2 s and stops when the tab is hidden. It uses no long-lived
+connections, which would keep an instance billed. One viewer for an hour is about 1,800 tiny requests, and
+Cloud Run's free tier is 2 million a month.
 
 Every response carries `X-Revision` and `X-Instance` headers.
 

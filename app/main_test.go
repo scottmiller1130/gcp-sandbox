@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -53,18 +51,21 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
-// The CSP allows the inline stylesheet by hash, so the hash must match the
-// bytes actually rendered or the page loses its styling.
-func TestCSPMatchesRenderedStyle(t *testing.T) {
+// Scripts and styles must come from the app's own files only.
+func TestStrictCSPAndNoInlineCode(t *testing.T) {
 	rec := get(t, testApp(nil), "/")
-	m := regexp.MustCompile(`(?s)<style>(.*?)</style>`).FindStringSubmatch(rec.Body.String())
-	if m == nil {
-		t.Fatal("no <style> in page")
+	csp := rec.Header().Get("Content-Security-Policy")
+	for _, want := range []string{"default-src 'none'", "script-src 'self'", "style-src 'self'", "frame-ancestors 'none'"} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("CSP %q missing %q", csp, want)
+		}
 	}
-	sum := sha256.Sum256([]byte(m[1]))
-	want := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
-	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, want) {
-		t.Fatalf("CSP %q does not allow rendered style %s", csp, want)
+	if strings.Contains(csp, "unsafe-inline") || strings.Contains(csp, "unsafe-eval") {
+		t.Errorf("CSP allows unsafe code: %q", csp)
+	}
+	body := rec.Body.String()
+	if regexp.MustCompile(`<script>|<style>|\sstyle="|\son[a-z]+="`).MatchString(body) {
+		t.Error("page contains inline script, style or event handlers, which the CSP would block")
 	}
 }
 

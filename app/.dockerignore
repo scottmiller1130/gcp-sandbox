@@ -1,4 +1,6 @@
 *
 !go.mod
 !*.go
+!static
+!static/**
 *_test.go

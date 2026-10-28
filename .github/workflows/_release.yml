@@ -79,7 +79,7 @@ jobs:
           gcloud run deploy "$SERVICE" --region "$REGION" \
             --image "${{ inputs.image }}" \
             --revision-suffix "$suffix" \
-            --update-env-vars "ERROR_RATE=$ERROR_RATE" \
+            --update-env-vars "ERROR_RATE=$ERROR_RATE,APP_ENV=${{ inputs.environment }}" \
             --no-traffic --tag candidate --quiet
           url=$(gcloud run services describe "$SERVICE" --region "$REGION" --format json \
             | jq -r '.status.traffic[] | select(.tag == "candidate") | .url')

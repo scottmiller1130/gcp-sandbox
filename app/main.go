@@ -271,7 +271,7 @@ func (a *app) admin(w http.ResponseWriter, r *http.Request) {
 	// Compare hashes so the check takes the same time whatever the input length.
 	gotSum, wantSum := sha256.Sum256([]byte(got)), sha256.Sum256([]byte(a.adminToken))
 	if subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 || !isBearer {
-		a.log(r).Warn("admin: bad or missing token", "remote", clientIP(r))
+		a.log(r).Warn("admin: bad or missing token", "remote", logSafe(clientIP(r)))
 		w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return

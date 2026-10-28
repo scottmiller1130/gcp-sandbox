@@ -21,7 +21,7 @@ Defined in `scripts/journey.py`, in the order a visitor experiences it:
 ## How each PR is assessed
 
 1. **Walk** (measured). CI builds **main** and **the PR**, starts both, and walks each through the
-   journey like a visitor: health check, homepage (and its CSP), script, styles, live stats, a slow
+   journey like a visitor: the service answering, homepage (and its CSP), script, styles, live stats, a slow
    request, reading the flight log, and checking a cross-site signature is refused. Median of 3 runs
    each. This job runs the PR's code, so it gets **no secrets and no cloud access**.
 2. **Map** (deterministic). Changed files, and for Go the changed *functions*, are mapped onto the

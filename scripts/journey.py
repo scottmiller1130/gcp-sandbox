@@ -120,8 +120,10 @@ def _json(body: bytes) -> dict:
 
 
 PROBES = [
-    Probe("reach", "Health check", "GET", "/healthz",
-          lambda s, h, b: "" if s == 200 and b.strip() == b"ok" else f"expected 200 ok, got {s}"),
+    # Not /healthz: on *.run.app URLs Google's front end reserves paths ending
+    # in "z" and answers 404 itself. Only Cloud Run's own probes reach it.
+    Probe("reach", "Service answers", "GET", "/api/info",
+          lambda s, h, b: "" if s == 200 and "revision" in _json(b) else f"expected 200 with the revision, got {s}"),
     Probe("load", "Homepage", "GET", "/",
           lambda s, h, b: ("" if s == 200 and b'id="app"' in b else f"expected the Mission Control page, got {s}")
           or ("" if "default-src 'none'" in h.get("content-security-policy", "") else "strict Content-Security-Policy missing")),

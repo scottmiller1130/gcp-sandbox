@@ -220,39 +220,44 @@ locals {
   ]
 }
 
+# The API drops zero and empty values (xPos = 0, groupByFields = []) from what it
+# stores, so they're left out here too - otherwise every plan shows a diff.
 resource "google_monitoring_dashboard" "this" {
   project = var.project_id
   dashboard_json = jsonencode({
     displayName = local.label
     mosaicLayout = {
       columns = 48
-      tiles = [for t in local.layout : {
-        xPos   = t[1]
-        yPos   = t[2]
-        width  = 24
-        height = 16
-        widget = {
-          title = local.charts[t[0]].title
-          xyChart = {
-            chartOptions = { mode = "COLOR" }
-            dataSets = [{
-              plotType   = local.charts[t[0]].plot
-              targetAxis = "Y1"
-              timeSeriesQuery = {
-                timeSeriesFilter = {
-                  filter = local.charts[t[0]].filter
-                  aggregation = {
-                    alignmentPeriod    = "60s"
-                    perSeriesAligner   = local.charts[t[0]].aligner
-                    crossSeriesReducer = local.charts[t[0]].reducer
-                    groupByFields      = local.charts[t[0]].group
+      tiles = [for t in local.layout : merge(
+        t[1] == 0 ? {} : { xPos = t[1] },
+        t[2] == 0 ? {} : { yPos = t[2] },
+        {
+          width  = 24
+          height = 16
+          widget = {
+            title = local.charts[t[0]].title
+            xyChart = {
+              chartOptions = { mode = "COLOR" }
+              dataSets = [{
+                plotType   = local.charts[t[0]].plot
+                targetAxis = "Y1"
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = local.charts[t[0]].filter
+                    aggregation = merge(
+                      {
+                        alignmentPeriod    = "60s"
+                        perSeriesAligner   = local.charts[t[0]].aligner
+                        crossSeriesReducer = local.charts[t[0]].reducer
+                      },
+                      length(local.charts[t[0]].group) == 0 ? {} : { groupByFields = local.charts[t[0]].group },
+                    )
                   }
                 }
-              }
-            }]
+              }]
+            }
           }
-        }
-      }]
+      })]
     }
   })
 }

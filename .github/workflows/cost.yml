@@ -1,0 +1,85 @@
+name: Cost impact
+
+# Every pull request gets one comment answering "does this still fit the free
+# tier, and what's the worst case if it doesn't?" (scripts/cost.py):
+#
+#   model     cost drivers read from main and the PR (instance ceilings,
+#             always-on instances, polling, Firestore caps and caches, Scheduler
+#             jobs, secrets, images) turned into worst-case usage per free tier
+#   billable  resources and settings with no free tier that the PR adds
+#   AI        Claude looks for costs the model can't count; it can raise the
+#             risk, never lower it
+#
+# A PR that would create charges fails the check until someone adds the
+# `cost-accepted` label. The PR's code is only read, never run.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cost-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  cost:
+    if: github.event.action != 'labeled' && github.event.action != 'unlabeled' || github.event.label.name == 'cost-accepted'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r scripts/requirements-tf-risk.txt
+
+      - name: Check out main next to the PR
+        run: |
+          git worktree add -q "$RUNNER_TEMP/base" "origin/${{ github.base_ref }}"
+          git diff "origin/${{ github.base_ref }}...HEAD" > "$RUNNER_TEMP/pr.diff"
+
+      - name: Find the previous report (reused when the code hasn't changed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- cost-impact -->")) | .body' > prior.md || true
+
+      - name: Review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          python scripts/cost.py review --base "$RUNNER_TEMP/base" --head . --diff "$RUNNER_TEMP/pr.diff" \
+            --prior prior.md --head-sha "${{ github.event.pull_request.head.sha }}" --labels "$LABELS" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --md comment.md --verdict verdict.json
+          sed '/cost-verdict:/d' comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post the report on the PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('comment.md', 'utf8');
+            const marker = '<!-- cost-impact -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find(c => c.body.startsWith(marker));
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Gate on new charges
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: python scripts/cost.py gate --verdict verdict.json --labels "$LABELS"

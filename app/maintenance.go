@@ -88,7 +88,11 @@ func runMaintenance(ctx context.Context, getenv func(string) string, hc *http.Cl
 	token := metadataToken(hc, orDefault(getenv("METADATA_TOKEN_URL"), metadataURL))
 	// Back up first: a pruning problem must never cost a night's backup.
 	var backupErr error
-	if getenv("BACKUP_BUCKET") != "" {
+	if getenv("BACKUP_BUCKET") == "" {
+		// Not an error (local runs have no vault), but never silent: in the
+		// cloud this means tonight's data has no copy.
+		slog.Warn("backup skipped: BACKUP_BUCKET is not set, so new flight log entries have no copy in the vault")
+	} else {
 		v, err := vaultFromEnv(getenv, hc, token)
 		if err == nil {
 			_, err = v.backup(ctx, time.Now())

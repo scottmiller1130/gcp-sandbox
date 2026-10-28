@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -178,5 +179,17 @@ func TestMaintenanceBacksUpEvenIfPruningFails(t *testing.T) {
 	}
 	if st := backupStateFrom(g.docs[backupStateDoc]); !st.DrillOK || st.Total != 1 {
 		t.Fatalf("backup didn't run: %+v", st)
+	}
+}
+
+func TestMaintenanceWarnsWhenBackupIsNotConfigured(t *testing.T) {
+	var logs strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	_ = runMaintenance(context.Background(), func(string) string { return "" }, http.DefaultClient)
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "backup skipped") {
+		t.Fatalf("no warning when the vault isn't configured:\n%s", logs.String())
 	}
 }

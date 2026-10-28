@@ -55,6 +55,9 @@ pruning problem can't cost a night's backup:
    next run retries the same range.
 
 The result is stored in `meta/backup` and shown live in Mission Control's **"Why it won't be lost"** panel.
+The panel turns **OVERDUE** if the last drill is over 36 hours old, because a job that silently stopped
+running is as dangerous as one that fails. If the job runs without `BACKUP_BUCKET`, it logs a warning
+rather than skipping quietly.
 
 ## Restoring
 

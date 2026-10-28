@@ -397,6 +397,7 @@
   // -------------------------------------------------------------- flight log
 
   const FLIGHT_POLL_MS = 30000; // the server caches for minutes anyway
+  const BACKUP_OVERDUE_MS = 36 * 3600 * 1000; // nightly, plus slack
   const flight = { pick: 0, signed: false, data: null, timer: null };
 
   async function loadFlight() {
@@ -432,6 +433,17 @@
       el("span", {}, el("strong", { text: title }), el("span", { class: "muted small", text: detail })));
   }
 
+  // A backup that passed long ago is as bad as one that failed: the job has stopped running.
+  function backupGuard(b, now) {
+    const title = "Nightly backup + restore drill";
+    if (!b) return guard(null, title, "No backup yet: the first one runs tonight with the maintenance job.");
+    const age = now - Date.parse(b.drill_at);
+    if (age > BACKUP_OVERDUE_MS) {
+      return guard(false, `${title}: OVERDUE`, `Last ran ${ago(age)} ago, but it should run every night. Check the hello-web-maintenance job's executions and logs. Entries since then have no vault copy.`);
+    }
+    return guard(b.drill_ok, b.drill_ok ? title : `${title}: FAILED`, `${b.drill_ok ? "Passed" : "Failed"} ${ago(age)} ago. ${b.drill_message}`);
+  }
+
   function renderFlight() {
     const d = flight.data;
     renderEmojis(d.emojis || []);
@@ -463,9 +475,7 @@
       guard(s.location === "nam5" ? true : s.location ? false : null, "Multi-region",
         s.location === "nam5" ? "nam5: every write is copied to several US regions before it's confirmed. A whole region can fail without losing a signature." : `Location: ${s.location || "unknown"}`),
       guard(s.delete_protection, "Delete protection", s.delete_protection ? "The database can't be deleted, by Terraform, the console or anyone, until this is switched off." : "Off"),
-      guard(b ? b.drill_ok : null, "Nightly backup + restore drill",
-        !b ? "No backup yet: the first one runs tonight with the maintenance job." :
-          `${b.drill_ok ? "Passed" : "FAILED"} ${ago(now - Date.parse(b.drill_at))} ago. ${b.drill_message}`),
+      backupGuard(b, now),
       guard(b ? true : null, "Vault in another project",
         b ? `Latest: ${b.last_object.split("/").pop()}. Write-once: the backup identity can add files, never change or delete them, and a 90-day retention lock stops anyone else.` : "Backups go to a bucket in the shared project, out of reach of this environment."),
       guard(s.pitr ? true : false, "Point-in-time recovery",

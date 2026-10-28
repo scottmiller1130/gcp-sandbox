@@ -1,7 +1,8 @@
-# Daily Cloud Run Job that deletes old revisions of one service.
+# Daily Cloud Run Job: backs up the flight log, then deletes old revisions.
 #
 #   Cloud Scheduler --(OAuth, scheduler SA)--> Cloud Run Admin API jobs:run
 #     --> Job runs "server maintenance" as the pruner SA
+#     --> exports new flight-log entries to the vault (as the backup writer)
 #     --> lists/deletes revisions of the service
 #
 # Free tier: Scheduler gives 3 jobs per *billing account*, shared by every
@@ -75,6 +76,19 @@ resource "google_cloud_run_v2_job" "this" {
         env {
           name  = "KEEP"
           value = tostring(var.keep)
+        }
+
+        # Nightly flight-log backup to the vault (skipped when the bucket is empty).
+        dynamic "env" {
+          for_each = var.backup_bucket == "" ? {} : {
+            BACKUP_BUCKET = var.backup_bucket
+            BACKUP_PREFIX = var.backup_prefix
+            BACKUP_WRITER = var.backup_writer
+          }
+          content {
+            name  = env.key
+            value = env.value
+          }
         }
 
         resources {

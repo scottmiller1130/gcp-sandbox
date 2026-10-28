@@ -1,0 +1,131 @@
+name: Customer journey
+
+# Every pull request gets one comment answering "what will a customer notice?":
+#
+#   walk    build main and the PR, start both, and walk each through the
+#           visitor's journey (reach, load, watch, swarm, sign...). Runs the
+#           PR's code, so it gets no secrets and no cloud access.
+#   review  map the changed files onto the journey, compare the two walks,
+#           ask Claude to explain each step in customer terms, and post it.
+#           A step that works on main and breaks on the PR fails the check
+#           until someone adds the `risk-accepted` label.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: journey-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  walk:
+    # Label changes other than the sign-off label don't need a new walk.
+    if: github.event.action != 'labeled' && github.event.action != 'unlabeled' || github.event.label.name == 'risk-accepted'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+          cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build main and this PR
+        run: |
+          git worktree add -q "$RUNNER_TEMP/base" "origin/${{ github.base_ref }}"
+          (cd "$RUNNER_TEMP/base/app" && go build -o "$RUNNER_TEMP/server-main" .) || echo "::warning::main doesn't build"
+          (cd app && go build -o "$RUNNER_TEMP/server-pr" .) || echo "::error::This PR doesn't build"
+
+      - name: Walk both through the journey
+        # The PR's journey.py walks both, so new checks run against main too.
+        run: |
+          start() { # name port
+            [ -x "$RUNNER_TEMP/server-$1" ] || return 0
+            PORT=$2 "$RUNNER_TEMP/server-$1" > "$RUNNER_TEMP/$1.log" 2>&1 &
+            for _ in $(seq 50); do curl -fs "http://localhost:$2/healthz" >/dev/null && return 0; sleep 0.1; done
+            echo "::warning::$1 didn't start"; cat "$RUNNER_TEMP/$1.log"
+          }
+          start main 8081
+          start pr 8082
+          python scripts/journey.py check --url http://localhost:8081 --out walk-main.json
+          python scripts/journey.py check --url http://localhost:8082 --out walk-pr.json
+          [ -x "$RUNNER_TEMP/server-pr" ] || echo '[]' > walk-pr.json
+
+      - name: What changed
+        run: |
+          git diff --name-only "origin/${{ github.base_ref }}...HEAD" > files.txt
+          git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: journey-walk
+          path: |
+            walk-main.json
+            walk-pr.json
+            files.txt
+            pr.diff
+          retention-days: 7
+
+  review:
+    needs: walk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: journey-walk
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r scripts/requirements-tf-risk.txt
+
+      - name: Find the previous report (reused when the code hasn't changed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- customer-journey -->")) | .body' > prior.md || true
+
+      - name: Review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          python scripts/journey.py review \
+            --files files.txt --diff pr.diff --base walk-main.json --head walk-pr.json \
+            --prior prior.md --head-sha "${{ github.event.pull_request.head.sha }}" --labels "$LABELS" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --md comment.md --verdict verdict.json
+          sed '/journey-verdict:/d' comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post the report on the PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('comment.md', 'utf8');
+            const marker = '<!-- customer-journey -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find(c => c.body.startsWith(marker));
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Gate on a broken journey
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: python scripts/journey.py gate --verdict verdict.json --labels "$LABELS"

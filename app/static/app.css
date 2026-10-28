@@ -178,6 +178,28 @@ footer { max-width: 1200px; margin: 0 auto; padding: 0 16px 32px; }
 .result-row .track span { display: block; height: 100%; background: var(--c, var(--accent)); }
 .stats-line { display: flex; flex-wrap: wrap; gap: 6px 16px; font: 0.85rem var(--mono); margin: 8px 0; }
 
+/* --- Flight log ---------------------------------------------------------- */
+.flight { border-top: 4px solid var(--good); }
+.flight h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0.5rem 0; }
+.flight-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 28px; }
+@media (max-width: 760px) { .flight-grid { grid-template-columns: minmax(0, 1fr); } }
+.emojis { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.emojis button { font-size: 1.25rem; padding: 4px 9px; line-height: 1.3; }
+.emojis button.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, var(--panel-2)); }
+.flight .good { color: var(--good); }
+.flight .bad { color: var(--bad); }
+.entries { list-style: none; padding: 0; margin: 8px 0; }
+.entries li { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); overflow-wrap: anywhere; }
+.entries li.mine { animation: flash 1.6s ease-out; }
+.entries li.mine strong::after { content: " · you"; color: var(--accent); font-weight: 600; }
+.entries .em { font-size: 1.2rem; }
+.guards { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.guards li { display: grid; grid-template-columns: 1.6rem minmax(0, 1fr); gap: 8px; background: var(--panel-2); border-radius: 10px; padding: 9px 12px; }
+.guards li strong { display: block; font-size: 0.92rem; }
+.guards .ic { font: 700 1rem/1.4 var(--mono); color: var(--muted); text-align: center; }
+.guards li.ok .ic { color: var(--good); }
+.guards li.off .ic { color: var(--warn); }
+
 /* --- Badges -------------------------------------------------------------- */
 .badges { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 .badges li { border: 1px dashed var(--line); border-radius: 10px; padding: 8px 10px; opacity: 0.45; }

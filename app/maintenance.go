@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,8 +14,13 @@ import (
 	"time"
 )
 
-// Cloud Run keeps every revision ever deployed. This job, run daily by Cloud
-// Scheduler, deletes old ones: it keeps the newest KEEP revisions plus any
+// The nightly maintenance job, run by Cloud Scheduler. It does two things in
+// one run (the free tier has only 3 Scheduler jobs per billing account):
+//
+//   - backs up the flight log to the vault and runs a restore drill (backup.go)
+//   - prunes old revisions
+//
+// Cloud Run keeps every revision ever deployed. The pruner deletes old ones: it keeps the newest KEEP revisions plus any
 // revision that is serving traffic, tagged (previous/candidate/green) or the
 // latest ready one, so rollbacks always have something to roll back to.
 
@@ -79,6 +85,27 @@ func (c *runClient) do(ctx context.Context, method, url string, out any) error {
 }
 
 func runMaintenance(ctx context.Context, getenv func(string) string, hc *http.Client) error {
+	token := metadataToken(hc, orDefault(getenv("METADATA_TOKEN_URL"), metadataURL))
+	// Back up first: a pruning problem must never cost a night's backup.
+	var backupErr error
+	if getenv("BACKUP_BUCKET") == "" {
+		// Not an error (local runs have no vault), but never silent: in the
+		// cloud this means tonight's data has no copy.
+		slog.Warn("backup skipped: BACKUP_BUCKET is not set, so new flight log entries have no copy in the vault")
+	} else {
+		v, err := vaultFromEnv(getenv, hc, token)
+		if err == nil {
+			_, err = v.backup(ctx, time.Now())
+		}
+		if err != nil {
+			slog.Error("backup failed", "err", err)
+			backupErr = fmt.Errorf("backup: %w", err)
+		}
+	}
+	return errors.Join(backupErr, pruneRevisions(ctx, getenv, hc, token))
+}
+
+func pruneRevisions(ctx context.Context, getenv func(string) string, hc *http.Client, token tokenFunc) error {
 	project, region, service := getenv("GOOGLE_CLOUD_PROJECT"), getenv("REGION"), getenv("SERVICE")
 	if project == "" || region == "" || service == "" {
 		return fmt.Errorf("GOOGLE_CLOUD_PROJECT, REGION and SERVICE must be set")
@@ -90,7 +117,7 @@ func runMaintenance(ctx context.Context, getenv func(string) string, hc *http.Cl
 	dryRun := getenv("DRY_RUN") == "true"
 
 	c := &runClient{http: hc, base: orDefault(getenv("RUN_API"), runAPI)}
-	if c.token, err = accessToken(ctx, hc, orDefault(getenv("METADATA_TOKEN_URL"), metadataURL)); err != nil {
+	if c.token, err = token(ctx); err != nil {
 		return fmt.Errorf("get access token: %w", err)
 	}
 	svcURL := fmt.Sprintf("%s/projects/%s/locations/%s/services/%s", c.base, project, region, service)
@@ -143,28 +170,4 @@ func runMaintenance(ctx context.Context, getenv func(string) string, hc *http.Cl
 		return fmt.Errorf("%d of %d deletions failed", failed, len(del))
 	}
 	return nil
-}
-
-// accessToken gets a token for the job's service account from the metadata server.
-func accessToken(ctx context.Context, hc *http.Client, url string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Metadata-Flavor", "Google")
-	resp, err := hc.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("metadata server: %s", resp.Status)
-	}
-	var tok struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
-		return "", err
-	}
-	return tok.AccessToken, nil
 }

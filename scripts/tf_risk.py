@@ -43,6 +43,7 @@ MAX_COMMENT = 60000  # GitHub's limit is 65536
 CUSTOMER = "customer path"  # serving the site: service, public access, images, secrets
 DELIVERY = "delivery path"  # ability to ship and roll back: CI identities, keyless auth
 STATE = "terraform state"
+DATA = "customer data"  # the database, its backups and who may reach them
 OBSERVABILITY = "observability"  # seeing problems: uptime, alerts, SLOs, dashboards
 COST = "cost guardrail"
 MAINTENANCE = "maintenance"
@@ -198,6 +199,7 @@ RESOURCE_NAMES = {
     "google_iam_workload_identity_pool_provider": "keyless-auth provider",
     "google_storage_bucket": "storage bucket",
     "google_storage_bucket_iam_member": "storage bucket permission",
+    "google_firestore_database": "Firestore database",
     "google_billing_budget": "billing budget",
     "google_monitoring_uptime_check_config": "uptime check",
     "google_monitoring_alert_policy": "alert",
@@ -236,6 +238,14 @@ def _label(c: Change) -> str:
 def categorize(c: Change) -> str:
     t, v = c.type, _vals(c)
     member, role = str(v.get("member", "")), str(v.get("role", ""))
+    if t == "google_firestore_database" or role.startswith("roles/datastore."):
+        return DATA
+    if t in ("google_storage_bucket", "google_storage_bucket_iam_member") and "backups" in str(v.get("name") or v.get("bucket") or ""):
+        return DATA
+    if "backup-writer" in member or "backup-writer" in str(v.get("account_id", "")) or "backup-writer" in str(v.get("service_account_id", "")):
+        return DATA
+    if t == "google_project_service" and v.get("service") == "firestore.googleapis.com":
+        return DATA
     if t == "google_storage_bucket" and "tfstate" in str(v.get("name", "")):
         return STATE
     if t == "google_storage_bucket_iam_member" and "tfstate" in str(v.get("bucket", "")):
@@ -349,6 +359,46 @@ def _rule_cloud_run_update(c: Change) -> tuple[str, list[str]]:
     return risk, why
 
 
+def _rule_data(c: Change) -> tuple[str, list[str]]:
+    """Customer data: anything that could lose it, or stop it being backed up."""
+    t, v, a = c.type, _vals(c), c.action
+    if a in ("delete", "replace"):
+        if t == "google_project_service" and c.before.get("disable_on_destroy") is False:
+            return "LOW", ["Removed from Terraform only. The API stays enabled (disable_on_destroy = false)."]
+        if t == "google_firestore_database":
+            why = ["**Destroys the database.** Every customer record in it is gone; only the nightly vault backups remain (up to a day's loss)."]
+            if a == "replace":
+                why.append(f"Replacement is forced by: {', '.join(c.replace_paths) or 'a field that cannot change in place'}. A database's location can never change in place.")
+            return "CRITICAL", why
+        if t == "google_storage_bucket":
+            return "CRITICAL", ["Destroys the backup vault. If the database is then lost, there is nothing to restore from."]
+        if t == "google_project_iam_member" and "-run@" in str(v.get("member", "")):
+            return "CRITICAL", ["Removes the app's access to its database. Signing and reading the flight log fail for every visitor."]
+        return "HIGH", ["Breaks the nightly backup (the job can no longer export, borrow the vault identity or write to the vault). The restore drill will fail, and data written after this has no copy."]
+    if a == "update":
+        after, before = c.after, c.before
+        if t == "google_firestore_database":
+            if _touches(c, "delete_protection_state") and after.get("delete_protection_state") != "DELETE_PROTECTION_ENABLED":
+                return "CRITICAL", ["Turns off delete protection: the database could then be deleted by one API call or console click."]
+            if _touches(c, "deletion_policy") and after.get("deletion_policy") == "DELETE":
+                return "HIGH", ["Removing this resource from Terraform would now **delete the database**, not just forget it."]
+            if _touches(c, "point_in_time_recovery_enablement"):
+                return "MEDIUM", ["Changes point-in-time recovery. Turning it on is billed (breaks the free-tier goal); turning it off loses the 7-day minute-level history."]
+            return "MEDIUM", ["In-place change to the database's settings."]
+        if t == "google_storage_bucket":
+            old = ((before.get("retention_policy") or [{}])[0] or {}).get("retention_period")
+            new = ((after.get("retention_policy") or [{}])[0] or {}).get("retention_period")
+            if _touches(c, "retention_policy") and (new is None or (old and _num(new) is not None and _num(new) < _num(old))):
+                return "HIGH", ["Shortens or removes the vault's retention lock, so backups could be deleted sooner (or right away)."]
+            if _touches(c, "soft_delete_policy"):
+                return "MEDIUM", ["Changes how long deleted backups stay recoverable."]
+            return "MEDIUM", ["Changes the backup vault's settings."]
+        return "MEDIUM", ["Changes access to customer data or its backups."]
+    if a == "create" and t == "google_firestore_database":
+        return "LOW", ["New database; nothing existing changes. Its location is permanent once created."]
+    return "LOW", ["New resource; nothing existing changes."]
+
+
 def apply_rules(c: Change) -> None:
     c.category = categorize(c)
     a, t, v = c.action, c.type, _vals(c)
@@ -360,6 +410,9 @@ def apply_rules(c: Change) -> None:
         if c.changed_paths:
             risk = "MEDIUM"
             why.append("The import also changes it in place to match the code.")
+
+    elif c.category == DATA:
+        risk, why = _rule_data(c)
 
     elif destructive:
         if c.category == CUSTOMER:
@@ -448,7 +501,8 @@ def apply_rules(c: Change) -> None:
             why.append("Makes a non-website resource public.")
 
     # Dev is pre-production: one level lower, except for state and shared CI plumbing.
-    if c.env == "dev" and c.category not in (STATE, DELIVERY) and risk != "LOW":
+    # Lost data can't be redeployed, so it isn't lowered either.
+    if c.env == "dev" and c.category not in (STATE, DELIVERY, DATA) and risk != "LOW":
         risk = step_down(risk)
         why.append("Lowered one level: dev is pre-production.")
     if c.env == "shared" and c.category in (CUSTOMER, DELIVERY) and destructive:
@@ -470,7 +524,8 @@ About this system:
 - After the first deploy, a CI pipeline pins traffic to specific revisions. A Terraform change to the service's template creates a new revision with 0% traffic, and customers only get it when the Deploy workflow rolls it out (dev, then a prod canary at 10% -> 50% -> 100%, with automatic rollback on errors). Changes to ingress, IAM and other service-level settings take effect immediately.
 - Instances read an admin token from Secret Manager at startup. Cloud Run's service agent must be able to pull images from the shared registry, or scaling up and rollbacks fail.
 - CI authenticates to Google Cloud with keyless Workload Identity Federation. Breaking it blocks deploys and rollbacks.
-- Everything runs inside the free tier; a $1 budget alerts on any spend.
+- Each environment keeps customer data in a Firestore (default) database in the nam5 multi-region, with delete protection. Every night the maintenance job exports new records to a backup vault bucket in the shared project, through a "backup-writer" identity that can only add files, then runs a restore drill. Losing the database, the vault, or the job's ability to back up is the worst outcome here: data can't be redeployed.
+- Everything runs inside the free tier; a $1 budget alerts on any spend. Point-in-time recovery, managed backups and a second database are billed, so they're deliberately off.
 
 Each change arrives with a rule-based risk and the reasons behind it. That risk is a floor: raise it if you see a danger the rules missed (combinations of changes, ordering problems, values that look wrong), but never return a lower level. If you think the floor is too high, keep it and say why in "why".
 
@@ -528,6 +583,17 @@ def _ai_payload(changes: list[Change]) -> list[dict]:
 
 def ai_review(changes: list[Change], diff_text: str) -> tuple[dict | None, str]:
     """Returns (review, status). Never raises: the pipeline must not depend on it."""
+    user = (
+        "<plan_changes>\n" + json.dumps(_ai_payload(changes), indent=1, default=str) + "\n</plan_changes>\n\n"
+        "<terraform_diff>\n" + (diff_text or "(not available)") + "\n</terraform_diff>\n\n"
+        "Review every change in plan_changes (use its id), then give the overall assessment."
+    )
+    return ask_claude(SYSTEM_PROMPT, user, AI_SCHEMA)
+
+
+def ask_claude(system: str, user: str, schema: dict) -> tuple[dict | None, str]:
+    """One structured-output request to Claude. Returns (parsed JSON, status) and
+    never raises. Shared with journey.py."""
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return None, "skipped (no ANTHROPIC_API_KEY secret)"
     try:
@@ -535,18 +601,13 @@ def ai_review(changes: list[Change], diff_text: str) -> tuple[dict | None, str]:
     except ImportError:
         return None, "skipped (anthropic package not installed)"
 
-    user = (
-        "<plan_changes>\n" + json.dumps(_ai_payload(changes), indent=1, default=str) + "\n</plan_changes>\n\n"
-        "<terraform_diff>\n" + (diff_text or "(not available)") + "\n</terraform_diff>\n\n"
-        "Review every change in plan_changes (use its id), then give the overall assessment."
-    )
     client = anthropic.Anthropic()
     request = dict(
         model=MODEL,
         max_tokens=64000,
         thinking={"type": "adaptive"},
-        output_config={"effort": "high", "format": {"type": "json_schema", "schema": AI_SCHEMA}},
-        system=SYSTEM_PROMPT,
+        output_config={"effort": "high", "format": {"type": "json_schema", "schema": schema}},
+        system=system,
         messages=[{"role": "user", "content": user}],
     )
     # Server-side fallback: if the model declines, the API retries on Anthropic's

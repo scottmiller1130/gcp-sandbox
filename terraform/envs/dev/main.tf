@@ -34,6 +34,8 @@ locals {
   region   = data.terraform_remote_state.bootstrap.outputs.region
   project  = data.terraform_remote_state.bootstrap.outputs.environments[local.env].project_id
   deployer = data.terraform_remote_state.bootstrap.outputs.environments[local.env].deployer_email
+  backups  = data.terraform_remote_state.bootstrap.outputs.environments[local.env]
+  vault    = data.terraform_remote_state.bootstrap.outputs.backup_bucket
 }
 
 provider "google" {
@@ -77,6 +79,18 @@ module "pruner" {
   region         = local.region
   service_name   = module.app.name
   deployer_email = local.deployer
+  backup_bucket  = local.vault
+  backup_prefix  = local.backups.backup_prefix
+  backup_writer  = local.backups.backup_writer
+}
+
+module "data" {
+  source = "../../modules/firestore"
+
+  project_id          = local.project
+  app_service_account = module.app.runtime_service_account
+  job_service_account = module.pruner.service_account
+  backup_writer       = local.backups.backup_writer
 }
 
 module "observability" {
@@ -103,6 +117,11 @@ output "dashboard_url" {
 output "admin_curl" {
   description = "Call /admin with the token from Secret Manager"
   value       = "curl -s -H \"Authorization: Bearer $(gcloud secrets versions access latest --project ${local.project} --secret ${module.app.admin_token_secret})\" ${module.app.uri}/admin | jq"
+}
+
+output "restore_from_vault" {
+  description = "Replay every backup into Firestore (idempotent). Drop DRY_RUN=true to write."
+  value       = "gcloud run jobs execute ${module.pruner.job_name} --project ${local.project} --region ${local.region} --args restore --update-env-vars DRY_RUN=true --wait"
 }
 
 output "run_maintenance_now" {

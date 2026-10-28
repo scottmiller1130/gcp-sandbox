@@ -1,0 +1,95 @@
+# Customer data: the flight log
+
+Mission Control's **flight log** is the one thing on the site a visitor can *write*: pick an
+emoji, get a callsign, and your signature is stored for good. It's small, but it is
+built the way you'd treat data that's the core of a platform: **assume it can never be lost**,
+and stay inside the free tier while doing it.
+
+## Where it lives
+
+A Firestore database per environment (`modules/firestore`), `(default)` in **`nam5`**:
+
+| Layer | Protects against | Free? |
+|---|---|---|
+| **Multi-region (`nam5`)**: each write is copied synchronously to several US regions before it's confirmed, 99.999% SLA | a disk, zone or whole region failing | ✅ (only the first database in a project is free) |
+| **Delete protection** | someone deleting the database (API, console, Terraform) | ✅ |
+| **`prevent_destroy` + `deletion_policy = "ABANDON"`** | a Terraform change destroying it; removing it from code only forgets it | ✅ |
+| **Nightly backup to the vault** (below) | bugs, bad migrations, mistakes noticed later, losing the project | ✅ |
+| **Restore drill every night** | a backup that turns out not to work | ✅ |
+| **Risk review rules**: destroying the database or vault is 🔴 CRITICAL (even in dev), weakening protection is CRITICAL/HIGH | someone merging a dangerous change | ✅ |
+| ~~Point-in-time recovery (7 days, per-minute)~~ | ~~mistakes noticed within a week, with seconds of loss~~ | ❌ billed: off |
+| ~~Managed backups / scheduled exports~~ | | ❌ billed: off |
+| ~~A scratch database to rehearse restores in~~ | | ❌ only the first database is free |
+
+**The trade-off you accept for $0:** a disaster that destroys data *and* isn't caught can lose
+up to a day of writes (since the last nightly backup), instead of a few minutes with
+point-in-time recovery. Replication covers infrastructure failures with zero loss.
+
+## The vault
+
+`terraform/bootstrap/backups.tf`: a bucket in the **shared** project, so nothing in dev or
+prod (a bad apply, a compromised deploy, a deleted project) can reach it.
+
+- Each environment has a **`backup-writer`** identity that may only **add** files under its
+  own prefix (`dev/`, `prod/`) and read them back. It can't overwrite or delete anything.
+  Uploads also use `ifGenerationMatch=0`, so even a bug can't replace a backup.
+- A **90-day retention policy** stops anyone, owners included, deleting or replacing a
+  backup until it's 90 days old. It's *unlocked*, because locking is permanent; lock it on a real
+  platform once the period is agreed.
+- CI's `tf-apply` has no rights on this bucket, so no pipeline can touch existing backups.
+- Free tier: 5 GB-month of Cloud Storage. Each backup is a few KB.
+
+## The nightly job
+
+The existing `hello-web-maintenance` job (no new Scheduler job: the free tier has 3 per billing
+account, and dev + prod already use 2) now runs **backup first, then revision pruning**, so a
+pruning problem can't cost a night's backup:
+
+1. **Export** entries created since the last backup (incremental, so reads stay tiny) to
+   `<env>/flightlog/<timestamp>.json`, with a SHA-256 of its contents.
+2. **Upload** to the vault as `backup-writer`, which the job borrows for 10 minutes through IAM
+   Credentials (`roles/iam.serviceAccountTokenCreator` on that one account).
+3. **Drill**: read the file back from the vault, check it's byte-for-byte identical and the checksum
+   matches, then check the database holds **exactly as many entries as all backups together**.
+   That catches anything missed or deleted. If any check fails, the job fails and the
+   next run retries the same range.
+
+The result is stored in `meta/backup` and shown live in Mission Control's **"Why it won't be lost"** panel.
+The panel turns **OVERDUE** if the last drill is over 36 hours old, because a job that silently stopped
+running is as dangerous as one that fails. If the job runs without `BACKUP_BUCKET`, it logs a warning
+rather than skipping quietly.
+
+## Restoring
+
+```bash
+export CLOUDSDK_CORE_PROJECT=<env project>
+# What would be restored (reads the vault, writes nothing):
+gcloud run jobs execute hello-web-maintenance --region us-central1 \
+  --args restore --update-env-vars DRY_RUN=true --wait
+# Restore: replays every backup into Firestore. Idempotent (entries keep their IDs).
+gcloud run jobs execute hello-web-maintenance --region us-central1 --args restore --wait
+```
+
+`RESTORE_MAX` (default 15,000 entries) keeps a restore inside the daily free tier of 20k writes.
+
+## Staying free, by construction
+
+Firestore's free tier is 50k reads and 20k writes a day. Every path has a ceiling:
+
+| Path | Ceiling | Worst case per day (prod, 10 instances) |
+|---|---|---|
+| Signing | a transaction on a per-day counter: **2,000 signatures/day across all instances** | 2,000 reads + 4,000 writes |
+| Listing | cached **5 min** per instance, 10 entries + a count | ~34,500 reads, only if 10 instances were viewed non-stop all day |
+| Status panel | cached 10 min per instance | ~2,900 reads |
+| Backup | only new entries | ≤ 2,000 reads |
+| Per-instance backstop | 3,000 reads/day, then serve from cache | |
+
+Visitors choose only an emoji from a fixed set, and the callsign is generated by the server, so there's
+no free text to moderate. Signing also needs a same-origin JSON request (no cross-site posts),
+and there's one signature per instance every 2 s and per visitor every 15 s.
+
+## For a real platform
+
+If the data is the business, spend the money: **Cloud Spanner** multi-region (or Firestore with
+point-in-time recovery and managed backups), **locked** retention, backups copied to a second
+cloud or region, and restore drills into a separate database on a schedule.

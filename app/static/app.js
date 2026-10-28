@@ -99,6 +99,7 @@
     { id: "scaled", icon: "📈", title: "Scaled out", desc: "A swarm was answered by 2+ instances", test: () => state.scaledOut },
     { id: "chaos", icon: "🔥", title: "Chaos witness", desc: "Saw a 5xx or a revision rigged to fail", test: () => state.sawError },
     { id: "watch", icon: "🌙", title: "Night watch", desc: "Kept watching for 5 minutes", test: () => state.polls >= 150 },
+    { id: "signed", icon: "✍️", title: "Logged it", desc: "Signed the flight log, for good", test: () => flight.signed },
   ];
 
   let earned = new Set();
@@ -393,6 +394,135 @@
     poll();
   }
 
+  // -------------------------------------------------------------- flight log
+
+  const FLIGHT_POLL_MS = 30000; // the server caches for minutes anyway
+  const BACKUP_OVERDUE_MS = 36 * 3600 * 1000; // nightly, plus slack
+  const flight = { pick: 0, signed: false, data: null, timer: null };
+
+  async function loadFlight() {
+    try {
+      const res = await fetch("/api/flightlog", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      flight.data = await res.json();
+    } catch (err) {
+      flight.data = { enabled: false, reason: `Couldn't load the flight log (${err.message}).`, emojis: flight.data?.emojis || [] };
+    }
+    renderFlight();
+  }
+
+  function renderEmojis(emojis) {
+    const box = $("flight-emojis");
+    if (box.childElementCount === emojis.length) return;
+    box.replaceChildren(...emojis.map((e, i) => {
+      const b = el("button", { type: "button", role: "radio", "aria-checked": String(i === flight.pick), class: i === flight.pick ? "on" : "", text: e });
+      b.addEventListener("click", () => {
+        flight.pick = i;
+        for (const [j, x] of [...box.children].entries()) {
+          x.classList.toggle("on", j === i);
+          x.setAttribute("aria-checked", String(j === i));
+        }
+      });
+      return b;
+    }));
+  }
+
+  function guard(ok, title, detail) {
+    return el("li", { class: ok === true ? "ok" : ok === false ? "off" : "" },
+      el("span", { class: "ic", "aria-hidden": "true", text: ok === true ? "✓" : ok === false ? "–" : "…" }),
+      el("span", {}, el("strong", { text: title }), el("span", { class: "muted small", text: detail })));
+  }
+
+  // A backup that passed long ago is as bad as one that failed: the job has stopped running.
+  function backupGuard(b, now) {
+    const title = "Nightly backup + restore drill";
+    if (!b) return guard(null, title, "No backup yet: the first one runs tonight with the maintenance job.");
+    const age = now - Date.parse(b.drill_at);
+    if (age > BACKUP_OVERDUE_MS) {
+      return guard(false, `${title}: OVERDUE`, `Last ran ${ago(age)} ago, but it should run every night. Check the hello-web-maintenance job's executions and logs. Entries since then have no vault copy.`);
+    }
+    return guard(b.drill_ok, b.drill_ok ? title : `${title}: FAILED`, `${b.drill_ok ? "Passed" : "Failed"} ${ago(age)} ago. ${b.drill_message}`);
+  }
+
+  function renderFlight() {
+    const d = flight.data;
+    renderEmojis(d.emojis || []);
+    $("flight-sign").disabled = !d.enabled;
+    if (!d.enabled) {
+      $("flight-total").textContent = "offline";
+      $("flight-entries").replaceChildren(el("li", { class: "muted", text: d.reason }));
+      $("flight-guards").replaceChildren();
+      $("flight-cache").textContent = "";
+      return;
+    }
+    $("flight-total").textContent = `${d.total.toLocaleString()} signed`;
+    const now = Date.now();
+    $("flight-entries").replaceChildren(...(d.entries.length ? d.entries.map((e) =>
+      el("li", { class: e.id === flight.mine ? "mine" : "" },
+        el("span", { class: "em", text: e.emoji }),
+        el("span", {}, el("strong", { text: e.callsign }),
+          el("span", { class: "muted small", text: ` · ${ago(now - Date.parse(e.created))} ago · served by ${nameFor(e.instance)} on ${e.version}` }))))
+      : [el("li", { class: "muted", text: "Nobody yet. Be the first." })]));
+    $("flight-cache").textContent = (d.list_error ? `${d.list_error}. ` : "") +
+      `This instance refreshes the list every ${Math.round(d.cache_ttl_s / 60)} min to stay inside Firestore's free tier ` +
+      `(${d.budget.reads.toLocaleString()} of its ${d.budget.reads_cap.toLocaleString()} daily reads used).`;
+
+    const s = d.status || {};
+    const b = s.backup;
+    const guards = [];
+    if (s.error) guards.push(guard(null, "Status unavailable", s.error));
+    guards.push(
+      guard(s.location === "nam5" ? true : s.location ? false : null, "Multi-region",
+        s.location === "nam5" ? "nam5: every write is copied to several US regions before it's confirmed. A whole region can fail without losing a signature." : `Location: ${s.location || "unknown"}`),
+      guard(s.delete_protection, "Delete protection", s.delete_protection ? "The database can't be deleted, by Terraform, the console or anyone, until this is switched off." : "Off"),
+      backupGuard(b, now),
+      guard(b ? true : null, "Vault in another project",
+        b ? `Latest: ${b.last_object.split("/").pop()}. Write-once: the backup identity can add files, never change or delete them, and a 90-day retention lock stops anyone else.` : "Backups go to a bucket in the shared project, out of reach of this environment."),
+      guard(s.pitr ? true : false, "Point-in-time recovery",
+        s.pitr ? "On" : "Off on purpose: it's billed. The nightly vault copies cover it, at up to a day's loss instead of minutes."),
+      guard(true, "Free-tier guard",
+        `${(s.signatures_today || 0).toLocaleString()} of ${d.budget.sign_cap.toLocaleString()} signatures today. The cap is enforced in a transaction, so it holds across every instance.`),
+    );
+    $("flight-guards").replaceChildren(...guards);
+  }
+
+  async function signFlight() {
+    const btn = $("flight-sign");
+    btn.disabled = true;
+    const out = $("flight-result");
+    out.className = "small";
+    out.textContent = "Writing to Firestore…";
+    const t0 = performance.now();
+    try {
+      const res = await fetch("/api/flightlog", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ emoji: flight.pick }) });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      flight.signed = true;
+      flight.mine = body.entry.id;
+      out.className = "small good";
+      out.textContent = `${body.entry.emoji} Logged as ${body.entry.callsign} in ${fmtMs(performance.now() - t0)} ms, confirmed only after it reached more than one region.`;
+      if (flight.data?.enabled) {
+        flight.data.entries = [body.entry, ...flight.data.entries.filter((e) => e.id !== body.entry.id)].slice(0, 10);
+        flight.data.total++;
+        flight.data.status.signatures_today = body.signatures_today;
+        renderFlight();
+      }
+      checkBadges();
+      poll();
+    } catch (err) {
+      out.className = "small bad";
+      out.textContent = err.message;
+    } finally {
+      setTimeout(() => (btn.disabled = !flight.data?.enabled), 2000);
+    }
+  }
+
+  function scheduleFlight() {
+    clearTimeout(flight.timer);
+    if (state.paused || document.hidden) return;
+    flight.timer = setTimeout(() => loadFlight().then(scheduleFlight), FLIGHT_POLL_MS);
+  }
+
   // ------------------------------------------------------------------ wiring
 
   const youName = $("you-name");
@@ -406,14 +536,17 @@
     setStatus("resuming…");
     if (!state.paused) poll().then(schedule);
     else clearTimeout(state.timer);
+    scheduleFlight();
   });
   document.addEventListener("visibilitychange", () => {
     document.body.classList.toggle("paused", document.hidden || state.paused);
     setStatus("resuming…");
     if (!document.hidden && !state.paused) poll().then(schedule);
     else clearTimeout(state.timer);
+    scheduleFlight();
   });
   $("swarm-go").addEventListener("click", swarm);
+  $("flight-sign").addEventListener("click", signFlight);
   // Keep "not seen for …" ages fresh between polls.
   setInterval(() => !document.hidden && renderFleet(), 5000);
 
@@ -422,4 +555,5 @@
   if (document.readyState === "complete") journey();
   else window.addEventListener("load", journey);
   poll().then(schedule);
+  loadFlight().then(scheduleFlight);
 })();

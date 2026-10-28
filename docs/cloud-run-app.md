@@ -47,6 +47,7 @@ Infrastructure layout and the Terraform pipeline are in [terraform.md](terraform
 | `/` | **Mission Control**: a live view of the service's internals (below) |
 | `/api/stats` | What this instance is doing: identity, uptime, requests, in-flight, status counts, latency, recent requests and log lines. Powers Mission Control |
 | `/api/info` | Version, revision and instance as JSON. CI uses it to see which revision answered |
+| `/api/flightlog` | `GET` the flight log and its protection status; `POST {"emoji": n}` to sign it ([data](data.md)) |
 | `/work?ms=200` | Waits N ms (max 1000) before answering, so load tests can force scaling |
 | `/healthz` | Startup and liveness probe |
 | `/admin` | Instance internals. Needs the bearer token from Secret Manager |
@@ -66,6 +67,9 @@ The homepage shows what's happening inside the service, live:
   down by the instances that answered.
 - **Live request feed** and **instance logs**: each instance keeps its last 60 requests and 40 log lines
   in memory.
+- **Flight log**: the one thing that outlives instances, deploys and regions. Sign it and watch
+  the "why it won't be lost" checklist: multi-region, delete protection, last backup and restore drill,
+  and the free-tier guard. See [Customer data](data.md).
 - **Achievements**: for meeting two instances, catching a canary, seeing a cold start, and so on.
 
 **Privacy and safety:** the feed shows method, path and status only. Query values are dropped (except
@@ -198,7 +202,8 @@ Error Reporting are free at this scale.
 
 Every deploy leaves a revision behind. At 04:00 (America/Denver) each day, Cloud Scheduler
 starts the `hello-web-maintenance` **Cloud Run Job**. It runs the same image as
-`server maintenance` and deletes old revisions. It always keeps:
+`server maintenance`. First it backs up the flight log to the vault and runs a restore
+drill ([Customer data](data.md)). Then it deletes old revisions, always keeping:
 
 - the newest `revisions_to_keep` (5), and
 - any revision serving traffic, any tagged revision (`previous`, `candidate`, `green`),
@@ -235,7 +240,10 @@ canary gates as code changes.
 - Releases are gated and reversible, and the old revision stays deployed.
 - Server timeouts and a 10 s request timeout keep slow clients from tying up instances.
 
-**Not covered, because it isn't free:** surviving the loss of a whole region needs Cloud Run in two
+- The flight log's database is multi-region, so its data survives a region failure; see [Customer data](data.md).
+- Before any traffic moves, every release walks the [customer journey](customer-journey.md) on the candidate.
+
+**Not covered, because it isn't free:** keeping the *site* up through the loss of a whole region needs Cloud Run in two
 regions behind a global external Application Load Balancer (~$18/month). `min_instances = 0`
 also means the first request after an idle period waits for a cold start of a few hundred ms.
 Setting it to 1 removes that, but you pay for an idle instance.

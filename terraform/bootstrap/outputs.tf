@@ -16,6 +16,10 @@ output "workload_identity_provider" {
   value = google_iam_workload_identity_pool_provider.github.name
 }
 
+output "backup_bucket" {
+  value = google_storage_bucket.backups.name
+}
+
 output "ci_builder_email" {
   value = google_service_account.ci_builder.email
 }
@@ -27,6 +31,8 @@ output "environments" {
       project_number    = p.number
       deployer_email    = google_service_account.deployer[k].email
       run_service_agent = p.service_agents["run.googleapis.com"]
+      backup_writer     = google_service_account.backup_writer[k].email
+      backup_prefix     = "${k}/"
     }
   }
 }

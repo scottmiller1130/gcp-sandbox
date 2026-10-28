@@ -4,8 +4,12 @@
 // which instance and revision answered, what each instance is doing, how a
 // request travels, and how traffic moves during a rollout.
 //
+// It also keeps a "flight log" in Firestore that visitors can sign: the one
+// piece of state that outlives instances, deploys and regions (flightlog.go).
+//
 // Run as "server maintenance" it is instead a one-shot Cloud Run Job that
-// prunes old revisions (see maintenance.go).
+// backs up the flight log and prunes old revisions (maintenance.go, backup.go);
+// "server restore" replays the backups into Firestore.
 package main
 
 import (
@@ -81,6 +85,7 @@ type app struct {
 	status5xx atomic.Int64
 	feed      *ring[requestRecord]
 	events    *ring[event]
+	flight    *flightLog // nil when no database is connected (running locally)
 
 	page *template.Template
 }
@@ -95,6 +100,11 @@ func newApp(getenv func(string) string) *app {
 		adminToken:  strings.TrimSpace(getenv("ADMIN_TOKEN")),
 		started:     time.Now(),
 		feed:        newRing[requestRecord](feedSize),
+	}
+	if a.project != "" && getenv("FLIGHTLOG") != "off" {
+		hc := &http.Client{Timeout: 5 * time.Second}
+		a.flight = newFlightLog(&firestore{hc: hc, base: orDefault(getenv("FIRESTORE_API"), firestoreAPI), project: a.project,
+			token: metadataToken(hc, orDefault(getenv("METADATA_TOKEN_URL"), metadataURL))})
 	}
 	if r, err := strconv.ParseFloat(getenv("ERROR_RATE"), 64); err == nil {
 		a.errorRate = min(max(r, 0), 1)
@@ -114,6 +124,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/stats", a.stats)
 	mux.HandleFunc("GET /theme.css", a.theme)
 	mux.Handle("GET /static/", noListing(cacheable(http.StripPrefix("/static/", http.FileServerFS(static)))))
+	mux.HandleFunc("GET /api/flightlog", a.flightLogGet)
+	mux.HandleFunc("POST /api/flightlog", a.flightLogSign)
 	mux.HandleFunc("GET /api/info", a.faults(a.apiInfo))
 	mux.HandleFunc("GET /work", a.faults(a.work))
 	mux.HandleFunc("GET /{$}", a.faults(a.index))
@@ -352,9 +364,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	if len(os.Args) > 1 && os.Args[1] == "maintenance" {
-		if err := runMaintenance(ctx, os.Getenv, http.DefaultClient); err != nil {
-			slog.Error("maintenance failed", "err", err)
+	if len(os.Args) > 1 {
+		run := map[string]func(context.Context, func(string) string, *http.Client) error{
+			"maintenance": runMaintenance,
+			"restore":     runRestore,
+		}[os.Args[1]]
+		if run == nil {
+			slog.Error("unknown command", "command", os.Args[1])
+			os.Exit(2)
+		}
+		if err := run(ctx, os.Getenv, &http.Client{Timeout: time.Minute}); err != nil {
+			slog.Error(os.Args[1]+" failed", "err", err)
 			os.Exit(1)
 		}
 		return

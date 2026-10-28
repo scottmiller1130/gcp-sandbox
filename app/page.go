@@ -60,6 +60,25 @@ const pageHTML = `<!doctype html>
     <div id="swarm-result" aria-live="polite"></div>
   </section>
 
+  <section class="card wide flight" aria-labelledby="h-flight">
+    <h2 id="h-flight">Flight log <span class="count" id="flight-total">…</span></h2>
+    <p class="muted">Everything else on this page lives in one instance's memory and vanishes when it scales to zero. The flight log is stored in Firestore, copied across several US regions before a signature is confirmed, and backed up nightly to a separate project.</p>
+    <div class="flight-grid">
+      <div>
+        <h3>Sign it</h3>
+        <div id="flight-emojis" class="emojis" role="radiogroup" aria-label="Pick your emoji"></div>
+        <button id="flight-sign" type="button" class="primary" disabled>Sign the log</button>
+        <p id="flight-result" class="small" aria-live="polite"></p>
+        <ol id="flight-entries" class="entries"><li class="muted">Loading…</li></ol>
+        <p id="flight-cache" class="muted small"></p>
+      </div>
+      <div>
+        <h3>Why it won't be lost</h3>
+        <ul id="flight-guards" class="guards"><li class="muted">Checking the database…</li></ul>
+      </div>
+    </div>
+  </section>
+
   <section class="card wide" aria-labelledby="h-radar">
     <h2 id="h-radar">Rollout radar</h2>
     <p class="muted">Which revision answered your last <span id="radar-n">0</span> requests. During a canary this bar moves 10% → 50% → 100%.</p>

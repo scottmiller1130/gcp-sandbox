@@ -92,6 +92,12 @@ jobs:
           curl -fsS --retry 3 "${{ steps.candidate.outputs.url }}/" -o /dev/null
           scripts/verify.sh "${{ steps.candidate.outputs.url }}" 50 20
 
+      - name: Walk the customer journey on the candidate
+        # Same walk as on pull requests, but against the real deployment, with
+        # its database attached. Any failing step stops the release here, before
+        # a single customer is sent to it.
+        run: python3 scripts/journey.py check --url "${{ steps.candidate.outputs.url }}" --out journey.json --strict
+
       - name: Keep the old revision addressable for rollback
         if: steps.current.outputs.revision != ''
         run: |

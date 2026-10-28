@@ -3,12 +3,16 @@
 // It serves a public page that shows which revision and instance handled the
 // request, so canary and blue/green rollouts are visible in the browser, plus a
 // few endpoints used by CI and load tests.
+//
+// Run as "server maintenance" it is instead a one-shot Cloud Run Job that
+// prunes old revisions (see maintenance.go).
 package main
 
 import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -20,7 +24,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -31,6 +38,9 @@ var version = "dev"
 // maxWorkMS caps /work so a public caller can't hold requests open for long.
 const maxWorkMS = 1000
 
+// Logs with this @type show up in Error Reporting, grouped by service and version.
+const errorReportingType = "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"
+
 type info struct {
 	Service  string `json:"service"`
 	Version  string `json:"version"`
@@ -40,20 +50,28 @@ type info struct {
 }
 
 type app struct {
-	service   string
-	revision  string
-	instance  string
-	errorRate float64 // fraction of requests to fail on purpose; for testing rollbacks
-	style     template.CSS
-	csp       string
-	page      *template.Template
+	service    string
+	revision   string
+	instance   string
+	project    string  // for linking logs to Cloud Trace; empty when running locally
+	errorRate  float64 // fraction of requests to fail on purpose; for testing rollbacks
+	adminToken string  // from Secret Manager; empty disables /admin
+	started    time.Time
+	requests   atomic.Int64
+	injected   atomic.Int64
+	style      template.CSS
+	csp        string
+	page       *template.Template
 }
 
 func newApp(getenv func(string) string) *app {
 	a := &app{
-		service:  orDefault(getenv("K_SERVICE"), "local"),
-		revision: orDefault(getenv("K_REVISION"), "local"),
-		instance: randomID(),
+		service:    orDefault(getenv("K_SERVICE"), "local"),
+		revision:   orDefault(getenv("K_REVISION"), "local"),
+		instance:   randomID(),
+		project:    getenv("GOOGLE_CLOUD_PROJECT"),
+		adminToken: strings.TrimSpace(getenv("ADMIN_TOKEN")),
+		started:    time.Now(),
 	}
 	if r, err := strconv.ParseFloat(getenv("ERROR_RATE"), 64); err == nil {
 		a.errorRate = min(max(r, 0), 1)
@@ -80,6 +98,7 @@ func newApp(getenv func(string) string) *app {
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.healthz)
+	mux.HandleFunc("GET /admin", a.admin)
 	mux.HandleFunc("GET /api/info", a.faults(a.apiInfo))
 	mux.HandleFunc("GET /work", a.faults(a.work))
 	mux.HandleFunc("GET /{$}", a.faults(a.index))
@@ -94,6 +113,38 @@ func (a *app) info() info {
 		Instance: a.instance,
 		Time:     time.Now().UTC().Format(time.RFC3339Nano),
 	}
+}
+
+// log returns a logger whose lines are linked to the request's trace, so the
+// Logs Explorer and Cloud Trace can jump between them.
+func (a *app) log(r *http.Request) *slog.Logger {
+	traceID, spanID := parseTraceContext(r)
+	if a.project == "" || traceID == "" {
+		return slog.Default()
+	}
+	return slog.With(
+		"logging.googleapis.com/trace", "projects/"+a.project+"/traces/"+traceID,
+		"logging.googleapis.com/spanId", spanID,
+	)
+}
+
+// parseTraceContext reads the trace Cloud Run attaches to each request, from
+// the W3C traceparent header or Google's older X-Cloud-Trace-Context.
+func parseTraceContext(r *http.Request) (traceID, spanID string) {
+	// traceparent: 00-<32 hex trace id>-<16 hex span id>-<flags>
+	if p := strings.Split(r.Header.Get("traceparent"), "-"); len(p) == 4 && len(p[1]) == 32 && len(p[2]) == 16 {
+		return p[1], p[2]
+	}
+	// X-Cloud-Trace-Context: <trace id>/<decimal span id>;o=1
+	if v := r.Header.Get("X-Cloud-Trace-Context"); v != "" {
+		traceID, rest, _ := strings.Cut(v, "/")
+		span, _, _ := strings.Cut(rest, ";")
+		if n, err := strconv.ParseUint(span, 10, 64); err == nil {
+			return traceID, fmt.Sprintf("%016x", n)
+		}
+		return traceID, ""
+	}
+	return "", ""
 }
 
 func (a *app) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -121,14 +172,54 @@ func (a *app) work(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *app) index(w http.ResponseWriter, _ *http.Request) {
+func (a *app) index(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := a.page.Execute(w, struct {
 		info
 		Style template.CSS
 	}{a.info(), a.style}); err != nil {
-		slog.Error("render page", "err", err)
+		a.log(r).Error("render page", "err", err)
 	}
+}
+
+// admin shows this instance's internals. It needs the bearer token stored in
+// Secret Manager, and is hidden (404) when no token is configured.
+func (a *app) admin(w http.ResponseWriter, r *http.Request) {
+	if a.adminToken == "" {
+		http.NotFound(w, r)
+		return
+	}
+	got, isBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	// Compare hashes so the check takes the same time whatever the input length.
+	gotSum, wantSum := sha256.Sum256([]byte(got)), sha256.Sum256([]byte(a.adminToken))
+	if subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 || !isBearer {
+		a.log(r).Warn("admin: bad or missing token", "remote", r.Header.Get("X-Forwarded-For"))
+		w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	writeJSON(w, http.StatusOK, struct {
+		info
+		Uptime         string  `json:"uptime"`
+		Requests       int64   `json:"requests"`
+		InjectedErrors int64   `json:"injected_errors"`
+		ErrorRate      float64 `json:"error_rate"`
+		GoVersion      string  `json:"go_version"`
+		Goroutines     int     `json:"goroutines"`
+		HeapMiB        float64 `json:"heap_mib"`
+	}{
+		info:           a.info(),
+		Uptime:         time.Since(a.started).Round(time.Second).String(),
+		Requests:       a.requests.Load(),
+		InjectedErrors: a.injected.Load(),
+		ErrorRate:      a.errorRate,
+		GoVersion:      runtime.Version(),
+		Goroutines:     runtime.NumGoroutine(),
+		HeapMiB:        float64(mem.HeapAlloc) / (1 << 20),
+	})
 }
 
 // faults fails a share of requests when ERROR_RATE is set. The error body still
@@ -136,6 +227,12 @@ func (a *app) index(w http.ResponseWriter, _ *http.Request) {
 func (a *app) faults(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.errorRate > 0 && mrand.Float64() < a.errorRate {
+			a.injected.Add(1)
+			a.log(r).Error("injected failure on "+r.URL.Path,
+				"@type", errorReportingType,
+				"serviceContext", map[string]string{"service": a.service, "version": version},
+				"context", map[string]any{"httpRequest": map[string]any{"method": r.Method, "url": r.URL.Path, "responseStatusCode": 500}},
+			)
 			writeJSON(w, http.StatusInternalServerError, struct {
 				Error string `json:"error"`
 				info
@@ -148,6 +245,7 @@ func (a *app) faults(next http.HandlerFunc) http.HandlerFunc {
 
 func (a *app) secureHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.requests.Add(1)
 		h := w.Header()
 		h.Set("Content-Security-Policy", a.csp)
 		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
@@ -198,6 +296,17 @@ func main() {
 		},
 	})))
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+
+	if len(os.Args) > 1 && os.Args[1] == "maintenance" {
+		if err := runMaintenance(ctx, os.Getenv, http.DefaultClient); err != nil {
+			slog.Error("maintenance failed", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	a := newApp(os.Getenv)
 	srv := &http.Server{
 		Addr:              ":" + orDefault(os.Getenv("PORT"), "8080"),
@@ -209,19 +318,17 @@ func main() {
 		MaxHeaderBytes:    16 << 10,
 	}
 
-	// Cloud Run sends SIGTERM and allows ~10s before killing the instance:
-	// stop accepting new connections and let in-flight requests finish.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-	defer stop()
-
 	go func() {
-		slog.Info("listening", "addr", srv.Addr, "version", version, "revision", a.revision, "instance", a.instance, "error_rate", a.errorRate)
+		slog.Info("listening", "addr", srv.Addr, "version", version, "revision", a.revision,
+			"instance", a.instance, "error_rate", a.errorRate, "admin_enabled", a.adminToken != "")
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server failed", "err", err)
 			os.Exit(1)
 		}
 	}()
 
+	// Cloud Run sends SIGTERM and allows ~10s before killing the instance:
+	// stop accepting new connections and let in-flight requests finish.
 	<-ctx.Done()
 	slog.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)

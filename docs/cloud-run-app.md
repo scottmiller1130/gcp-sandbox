@@ -35,6 +35,9 @@ stay inside the GCP free tier.
 | `app/` | Go web server + Dockerfile (distroless, non-root, ~17 MB) |
 | `infra/` | Terraform: Cloud Run, Artifact Registry, service accounts, GitHub trust |
 | `.github/workflows/` | `ci`, `deploy`, `promote`, `rollback`, `loadtest` |
+| `infra/secrets.tf` | Secret Manager: the `/admin` token |
+| `infra/observability.tf` | Uptime check, alerts, SLOs, dashboard |
+| `infra/scheduler.tf` | Cloud Scheduler + Cloud Run Job that prunes old revisions |
 | `scripts/verify.sh` | Health gate used by every release step |
 | `loadtest/k6.js` | k6 load profile |
 
@@ -46,6 +49,7 @@ stay inside the GCP free tier.
 | `/api/info` | Same as JSON. CI uses it to see which revision answered |
 | `/work?ms=200` | Waits N ms (max 1000) before answering, so load tests can force scaling |
 | `/healthz` | Startup and liveness probe |
+| `/admin` | Instance internals (uptime, request count, memory). Needs the bearer token from Secret Manager |
 
 Every response carries `X-Revision` and `X-Instance` headers.
 
@@ -103,13 +107,93 @@ Inputs are capped (200 users, 10 minutes, `max_instances` ≤ 20). A default run
   Federation. Trust is pinned to this repo's numeric ID and the `main` branch, so
   workflows on PRs, forks and other branches can't authenticate at all.
 - **Least privilege.** The deployer can push images, read Cloud Run, and change
-  *only* the `hello-web` service. The app's runtime identity has **no** roles.
+  *only* the `hello-web` service and its maintenance job. The app's runtime identity can
+  read only its own secret.
 - **Hardened image.** Distroless (no shell or package manager), non-root, static
   binary, deployed by digest.
 - **Hardened responses.** Strict CSP (no scripts, only the page's own stylesheet by hash),
   HSTS, nosniff, no framing, no referrer. Unknown paths return 404 and non-GET methods return 405.
 - **CI gates.** gofmt, vet, race-enabled tests, `govulncheck`, shellcheck, actionlint,
   terraform validate. Dependabot keeps actions, Go, base images and providers current.
+
+## Secret Manager
+
+The `/admin` endpoint is protected by a bearer token stored in Secret Manager as
+`hello-web-admin-token`.
+
+- **Terraform generates the token** with an *ephemeral* resource and writes it with a
+  *write-only* attribute, so it never appears in the Terraform state or plan.
+- **Only the app's runtime identity can read it**, and that's the only permission the runtime identity has.
+- **Cloud Run injects it** as `ADMIN_TOKEN` when each instance starts, using the `latest` version.
+
+```bash
+curl -s -H "Authorization: Bearer $(gcloud secrets versions access latest --secret hello-web-admin-token)" \
+  https://<service-url>/admin | jq
+```
+
+**Rotate it:** bump `admin_token_version` in `infra/variables.tf`, `terraform apply`
+(a new version is created *before* the old one is destroyed), then run **Deploy**
+(`direct`) so new instances start with the new token. Old instances keep the old token
+until Cloud Run replaces them.
+
+Free tier: 6 active versions and 10k accesses per month. Rotation replaces the version
+rather than adding one, and each instance start counts as one access.
+
+## Observability
+
+| What | Where |
+|---|---|
+| **Dashboard** with requests, 5xx and p95 latency *by revision*, instances, uptime, maintenance runs | `terraform -chdir=infra output dashboard_url` |
+| **Logs** as structured JSON, each line linked to its request's trace | Logging → Logs Explorer, `resource.labels.service_name="hello-web"` |
+| **Traces**: Cloud Run traces incoming requests automatically | Trace Explorer (open a trace to jump to its logs) |
+| **Error Reporting**: injected failures are reported grouped by *version* | Error Reporting |
+| **Uptime check** on `/` every 5 min from Oregon, Iowa and Virginia | Monitoring → Uptime checks |
+| **Alerts**: site down (2+ locations failing) and 5xx rate above 5% | Monitoring → Alerting |
+| **SLOs**: 99% availability and 95% of requests under 1s, both over a rolling 7 days | Monitoring → Services → hello-web |
+
+Alerts open incidents in the console. To get emailed too, set `alert_email` (e.g.
+`terraform -chdir=infra apply -var alert_email=you@example.com`).
+
+Try it: run **Deploy** with `error_rate: 0.1` and `strategy: blue-green`, then load test
+`target: candidate`. The dashboard shows the 5xx line for the green revision only,
+Error Reporting groups the failures under green's version, and the 5xx alert fires.
+Production's SLO isn't affected because green receives no production traffic.
+
+Cost: uptime checks are free up to 1M runs/month (this one uses ~26k). Alerting is free
+until at least Sept 2027. After that the uptime alert stays free and the 5xx alert would be
+~$0.35/month (`enable_error_rate_alert = false` turns it off). Dashboards, SLOs, Trace and
+Error Reporting are free at this scale.
+
+## Scheduled maintenance (Cloud Scheduler + Cloud Run Jobs)
+
+Every deploy leaves a revision behind. At 04:00 (America/Denver) each day, Cloud Scheduler
+starts the `hello-web-maintenance` **Cloud Run Job**. It runs the same image as
+`server maintenance` and deletes old revisions. It always keeps:
+
+- the newest `revisions_to_keep` (5), and
+- any revision serving traffic, any tagged revision (`previous`, `candidate`, `green`),
+  and the latest ready revision, so a rollback target is never deleted.
+
+Identities: the **scheduler** account can only start this job. The **job** account can
+only manage revisions of `hello-web`. CI updates the job's image after every release.
+
+```bash
+gcloud run jobs execute hello-web-maintenance --region us-central1 --wait      # run now
+gcloud run jobs execute hello-web-maintenance --region us-central1 \
+  --update-env-vars DRY_RUN=true --wait                                         # preview only
+gcloud scheduler jobs run hello-web-maintenance-daily --location us-central1   # test the trigger
+```
+
+Free tier: Scheduler gives 3 jobs per billing account (this uses 1). The job runs for
+a few seconds a day.
+
+## How infrastructure changes roll out
+
+Terraform owns the service's *shape*: scaling, probes, identity and secrets. CI owns
+the image, env vars and traffic split. A Terraform change to the service creates a new
+revision that gets **0% traffic**, because CI pins traffic to specific revisions. The next
+**Deploy** builds on the latest config, so your change rolls out through the same
+canary gates as code changes.
 
 ## Resilience
 

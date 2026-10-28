@@ -55,3 +55,45 @@ variable "bootstrap_image" {
   type        = string
   default     = "us-docker.pkg.dev/cloudrun/container/hello"
 }
+
+variable "admin_token_version" {
+  description = "Bump to rotate the /admin token (Terraform generates a new one; it never enters state)"
+  type        = number
+  default     = 1
+}
+
+variable "alert_email" {
+  description = "Where alerts are emailed. Leave empty to only show incidents in the console."
+  type        = string
+  default     = ""
+}
+
+variable "maintenance_schedule" {
+  description = "Cron schedule for the revision-pruning job"
+  type        = string
+  default     = "0 4 * * *"
+}
+
+variable "maintenance_time_zone" {
+  description = "Time zone for maintenance_schedule"
+  type        = string
+  default     = "America/Denver"
+}
+
+variable "revisions_to_keep" {
+  description = "Newest revisions the maintenance job always keeps (serving or tagged revisions are kept regardless)"
+  type        = number
+  default     = 5
+}
+
+variable "bootstrap_job_image" {
+  description = "Image used only when the maintenance job is first created. CI owns the image after that."
+  type        = string
+  default     = "us-docker.pkg.dev/cloudrun/container/job"
+}
+
+variable "enable_error_rate_alert" {
+  description = "5xx-ratio alert. Free until alerting billing starts (no sooner than Sept 2027), then ~$0.35/month."
+  type        = bool
+  default     = true
+}

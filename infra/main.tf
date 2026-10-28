@@ -8,6 +8,10 @@ locals {
     "iamcredentials.googleapis.com",
     "sts.googleapis.com",
     "monitoring.googleapis.com",
+    "secretmanager.googleapis.com",
+    "cloudscheduler.googleapis.com",
+    "cloudtrace.googleapis.com",
+    "clouderrorreporting.googleapis.com",
   ]
 }
 
@@ -51,8 +55,8 @@ resource "google_artifact_registry_repository" "apps" {
 # Service accounts
 # ---------------------------------------------------------------------------
 
-# Identity the app runs as. It has no roles: the app calls no Google APIs, so
-# a compromised container can't reach anything else in the project.
+# Identity the app runs as. Its only permission is reading its own admin token
+# (secrets.tf), so a compromised container can't reach anything else.
 resource "google_service_account" "runtime" {
   account_id   = "${var.service_name}-run"
   display_name = "${var.service_name} runtime (no permissions)"
@@ -169,6 +173,24 @@ resource "google_cloud_run_v2_service" "app" {
         container_port = 8080
       }
 
+      # Lets the app link its log lines to Cloud Trace.
+      env {
+        name  = "GOOGLE_CLOUD_PROJECT"
+        value = var.project_id
+      }
+
+      # Read from Secret Manager when each instance starts. "latest" means a
+      # rotated token reaches new instances without a Terraform change.
+      env {
+        name = "ADMIN_TOKEN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.admin_token.secret_id
+            version = "latest"
+          }
+        }
+      }
+
       resources {
         limits = {
           cpu    = "1"
@@ -215,7 +237,12 @@ resource "google_cloud_run_v2_service" "app" {
     ]
   }
 
-  depends_on = [google_project_service.enabled]
+  depends_on = [
+    google_project_service.enabled,
+    # The first revision can't start until the secret exists and is readable.
+    google_secret_manager_secret_version.admin_token,
+    google_secret_manager_secret_iam_member.runtime_reads_admin_token,
+  ]
 }
 
 # Public website: anyone may invoke it.

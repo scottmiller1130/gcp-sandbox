@@ -173,6 +173,15 @@ jobs:
           sleep 15
           scripts/verify.sh "${{ steps.current.outputs.url }}" 100 1
 
+      # Same binary, so the job always matches what production runs. Not part of
+      # the release gate: a failure here shouldn't roll back a healthy release.
+      - name: Point the maintenance job at the new image
+        if: env.STRATEGY != 'blue-green'
+        continue-on-error: true
+        run: |
+          gcloud run jobs update "${{ vars.CLOUD_RUN_JOB }}" --region "$REGION" \
+            --image "${{ needs.build.outputs.image }}" --quiet
+
       - name: Roll back on failure
         if: failure() && steps.candidate.outcome == 'success' && steps.current.outputs.revision != ''
         run: |

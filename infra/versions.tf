@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.11" # write-only attributes keep secrets out of state
 
   # State lives in GCS (free tier: 5 GB) so it isn't tied to one laptop.
   # Bucket is created once by hand - see docs/cloud-run-app.md.
@@ -12,6 +12,10 @@ terraform {
     google = {
       source  = "hashicorp/google"
       version = "~> 8.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.7"
     }
   }
 }

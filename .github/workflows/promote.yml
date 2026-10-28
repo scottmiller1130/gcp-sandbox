@@ -57,6 +57,13 @@ jobs:
           sleep 15
           scripts/verify.sh "${{ steps.find.outputs.url }}" 100 1
 
+      - name: Point the maintenance job at green's image
+        continue-on-error: true
+        run: |
+          image=$(gcloud run revisions describe "${{ steps.find.outputs.green }}" --region "$REGION" \
+            --format 'value(spec.containers[0].image)')
+          gcloud run jobs update "${{ vars.CLOUD_RUN_JOB }}" --region "$REGION" --image "$image" --quiet
+
       - name: Switch back to blue on failure
         if: failure() && steps.find.outcome == 'success'
         run: |

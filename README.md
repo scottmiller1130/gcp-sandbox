@@ -1,5 +1,9 @@
 # gcp-sandbox
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/scottmiller1130/gcp-sandbox/badge)](https://scorecard.dev/viewer/?uri=github.com/scottmiller1130/gcp-sandbox)
+[![CI](https://github.com/scottmiller1130/gcp-sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/scottmiller1130/gcp-sandbox/actions/workflows/ci.yml)
+[![Deploy](https://github.com/scottmiller1130/gcp-sandbox/actions/workflows/deploy.yml/badge.svg)](https://github.com/scottmiller1130/gcp-sandbox/actions/workflows/deploy.yml)
+
 A playground for learning Google Cloud by building things with Terraform.
 Each folder under `labs/` is self-contained: create it, poke at it, destroy it.
 

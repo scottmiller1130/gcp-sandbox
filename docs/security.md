@@ -22,11 +22,19 @@ Status: ✅ in place · 🔧 in progress · 📋 decision or document needed.
 | 3 | High | Default Compute service account has `roles/editor` in dev and prod (unused) | `google_project_default_service_accounts` with `DEPRIVILEGE` in the project module | 🔧 apply bootstrap |
 | 4 | High | No alert notification channels: alerts and failed restore drills notify nobody | Email channel and log-based alerts | 🔧 |
 | 5 | Medium | Data Access audit logs off; app logs kept 30 days; no immutable archive | Data Access logs: secret access, impersonation and token exchange, database writes and settings reads, and every read and write on the state, vault and ledger buckets. All audit logs from all 3 projects are routed to `audit-archive` (400 days) in the shared project. Plus a write-once **change ledger** bucket (400-day retention). ~1¢/month | 🔧 apply bootstrap |
-| 6 | Medium | Actions pinned by tag; any action allowed; no image, secret or IaC scanning; mutable image tags | Pin to SHAs, allow-list actions, add gitleaks, Trivy and checkov, immutable tags | 🔧 |
+| 6 | Medium | Actions pinned by tag; any action allowed; no image, secret or IaC scanning; mutable image tags | Every action pinned to a commit SHA (Dependabot keeps them current); Harden-Runner on every job; gitleaks (blocking), Trivy on the image (blocking on fixable HIGH/CRITICAL), checkov (reported), dependency review on PRs, CodeQL, OpenSSF Scorecard; SLSA build provenance signed at build and **verified before every deploy**. Allow-list and immutable tags follow once these merge | 🔧 |
 | 7 | Medium | A personal Gmail account owns all projects; no Google Cloud organization, so no org policies | Hardware-key 2SV, break-glass admin identity, quarterly access review; Cloud Identity Free + a domain for an org | 📋 |
-| 8 | Medium | The AI reviews send diffs to Anthropic (a subprocessor); a leaked secret would go with them | gitleaks before the AI step; vendor register | 🔧 |
+| 8 | Medium | The AI reviews send diffs to Anthropic (a subprocessor); a leaked secret would go with them | Secret scanning push protection stops a secret before it reaches GitHub (so before any review sees it); gitleaks re-checks every commit. Vendor register in the policies | 🔧 |
 | 9 | Low | `/admin` is public with a static bearer token, rotated by hand | Quarterly rotation; alert on failed attempts | 🔧 |
 | 10 | Low | No WAF or rate limiting (needs a load balancer, ~$18/month) | Accepted risk: abuse cost is capped by max instances | 📋 accepted |
+
+## Found by the new scanners
+
+| Scanner | Finding | Fix |
+|---|---|---|
+| Trivy | The app was built on **Go 1.25, which is out of support**: 1 CRITICAL and 4 HIGH stdlib vulnerabilities (HTTP/2 and Range-header denial of service, crypto/tls) that 1.25 will never get fixes for | Go 1.27.3; govulncheck and Trivy both clean |
+| CodeQL | 6 × log injection: trace headers, request paths and `X-Forwarded-For` written to logs as sent | Trace IDs must be well-formed hex; the client IP is the front end's entry, IP characters only; paths sanitised |
+| CodeQL | 17 × actions pinned by tag | Pinned to commit SHAs |
 
 ## Controls already in place
 

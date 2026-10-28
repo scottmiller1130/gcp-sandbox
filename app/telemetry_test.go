@@ -87,8 +87,8 @@ func TestStatsNeverLeaksClientDetails(t *testing.T) {
 }
 
 func TestStatsIncludesTraceOfThisRequest(t *testing.T) {
-	s := statsOf(t, testApp(nil), map[string]string{"X-Cloud-Trace-Context": "abc123/1;o=1"})
-	if s.TraceID != "abc123" {
+	s := statsOf(t, testApp(nil), map[string]string{"X-Cloud-Trace-Context": "105445aa7843bc8bf206b12000100000/1;o=1"})
+	if s.TraceID != "105445aa7843bc8bf206b12000100000" {
 		t.Fatalf("trace_id = %q", s.TraceID)
 	}
 }

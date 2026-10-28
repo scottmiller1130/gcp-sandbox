@@ -65,15 +65,20 @@ Rollback is a **pre-approved standard change**: it doesn't wait for the `prod` r
    `main` is protected: no direct pushes and no merge without approval and passing checks.
 3. **Approved again for prod:** the prod deploy and prod Terraform apply wait for a reviewer on the
    `prod` environment.
-4. **Recorded** in the change ledger: a record per apply and deploy, written to the write-once audit
-   bucket (PR, author, approver, commit, plan hash, verdicts, image digest, revision, run link).
+4. **Recorded** in the change ledger (`scripts/ledger.py`): after every apply and release, a record
+   (PR, author, approvals, deployment approval, verdicts, plan hash or image digest, revision, outcome,
+   run link) goes to the write-once ledger bucket, chained by SHA-256 to the previous record.
+   `python3 scripts/ledger.py verify` checks every record and the chain. Every prod release is also a
+   GitHub Release.
 5. **Watched:** any change made outside the pipeline (by a human rather than `tf-apply` or a deployer)
    raises an alert, and drift detection runs daily.
-6. **Emergencies:** an `emergency` label allows a fast path, recorded in the ledger and reviewed
-   within 24 hours.
+6. **Emergencies:** label the PR `emergency`; the owner may merge ahead of review (an admin bypass,
+   recorded by GitHub). The merge audit workflow opens a post-merge review issue, due in 24 hours. It
+   also catches any merge without an independent approval.
 
-## Policies to write (Phase 3)
+## Policies and SOC 2 mapping
 
-Information security, access control (including quarterly reviews), change management, incident
-response, backup and recovery, vendor management (Google Cloud, GitHub, Anthropic), and risk assessment.
-Each points to the evidence above.
+- [Policies](policies/README.md): information security, access control, change management, incident
+  response, backup and recovery, vendor management, risk assessment.
+- [SOC 2 control matrix](soc2-controls.md): each Trust Services Criterion, its control, and where the
+  evidence is.

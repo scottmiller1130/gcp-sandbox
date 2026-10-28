@@ -33,11 +33,17 @@ on:
       error_rate:
         type: string
         default: "0"
+    outputs:
+      revision:
+        description: The revision this release created
+        value: ${{ jobs.release.outputs.revision }}
 
 permissions:
   contents: read
   id-token: write
   attestations: read
+  pull-requests: read # the change ledger records the PR and its approvals
+  actions: read       # ...and who approved the deployment
 
 env:
   CLOUDSDK_CORE_PROJECT: ${{ inputs.project_id }}
@@ -55,6 +61,8 @@ jobs:
     # The `prod` environment waits for a required reviewer before this job
     # starts; the approval is recorded on the run.
     environment: ${{ inputs.environment }}
+    outputs:
+      revision: ${{ steps.candidate.outputs.revision }}
     # One release per environment at a time; never cancel one mid traffic shift.
     concurrency:
       group: release-${{ inputs.environment }}
@@ -193,3 +201,17 @@ jobs:
             scripts/traffic.sh "$SERVICE" "$REGION" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record in the change ledger
+        # A ledger problem is flagged on the run, but never fails a change that
+        # already happened.
+        continue-on-error: true
+        if: always() && steps.candidate.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LEDGER_BUCKET: ${{ vars.LEDGER_BUCKET }}
+        run: |
+          python3 scripts/ledger.py record --kind release --environment "${{ inputs.environment }}" \
+            --outcome "${{ job.status }}" --detail "image=${{ inputs.image }}" \
+            --detail "revision=${{ steps.candidate.outputs.revision }}" \
+            --detail "previous_revision=${{ steps.current.outputs.revision }}" --detail "strategy=$STRATEGY"

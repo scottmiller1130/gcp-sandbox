@@ -1,0 +1,51 @@
+name: Merge audit
+
+# Separation of duties, checked after the fact: every merge to main should
+# have been approved by someone other than its author. Branch protection
+# enforces that, but an admin can bypass it in an emergency. When that
+# happens (or the PR is labelled `emergency`), this opens a post-merge
+# review issue that must be closed within 24 hours.
+on:
+  pull_request_target: # runs the workflow from main, never the PR's code
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  audit:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - name: Check the approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+          EMERGENCY: ${{ contains(github.event.pull_request.labels.*.name, 'emergency') }}
+        run: |
+          approvers=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
+            --jq "[.[] | select(.state == \"APPROVED\" and .user.login != \"$AUTHOR\") | .user.login] | unique | join(\", \")")
+          if [ -n "$approvers" ] && [ "$EMERGENCY" != "true" ]; then
+            echo "PR #$PR approved by $approvers before merge."
+            exit 0
+          fi
+          reason="merged without an approval from anyone other than its author"
+          [ "$EMERGENCY" = "true" ] && reason="an emergency change, merged ahead of the usual review"
+          due=$(date -u -d '+24 hours' '+%Y-%m-%d %H:%M UTC')
+          printf '%s\n' \
+            "PR #$PR (by @$AUTHOR, merged by @$MERGED_BY) was $reason." "" \
+            "**Review it by $due**, then close this issue with what you found:" "" \
+            "- [ ] The change is what the PR describes, and nothing else" \
+            "- [ ] The automated reviews (risk / customer journey / cost) were read" \
+            "- [ ] Anything it left behind is fixed or ticketed" "" \
+            "Approvals at merge: ${approvers:-none}" > body.md
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "Post-merge review: #$PR" \
+            --label post-merge-review --assignee "$MERGED_BY" --body-file body.md
+          echo "::warning::PR #$PR $reason. Opened a post-merge review issue."

@@ -38,6 +38,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  attestations: read # each release checks the image's build provenance
 
 # One release at a time: two overlapping canaries would fight over the same
 # traffic split. A later push waits for the running release, never cancels it.
@@ -48,14 +49,21 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write # sign the image's build provenance
     outputs:
       image: ${{ steps.push.outputs.image }}
       version: ${{ steps.version.outputs.version }}
     env:
       IMAGE: ${{ vars.GCP_AR_REPO }}/hello-web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: app/go.mod
           cache: false
@@ -66,22 +74,34 @@ jobs:
       - id: version
         run: echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - uses: google-github-actions/auth@v2
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.CI_BUILDER_SA }}
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
       - run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
 
       - name: Build and push
         id: push
         working-directory: app
         run: |
-          tag="$IMAGE:${{ steps.version.outputs.version }}"
+          # Tags are immutable in the registry, so each build gets its own:
+          # re-running a deploy for the same commit can't collide.
+          tag="$IMAGE:${{ steps.version.outputs.version }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker build --build-arg VERSION=${{ steps.version.outputs.version }} -t "$tag" .
           docker push "$tag"
           # Deploy by digest: the exact bytes that were tested, in every environment.
-          echo "image=$(docker inspect --format '{{index .RepoDigests 0}}' "$tag")" >> "$GITHUB_OUTPUT"
+          ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$tag")
+          echo "image=$ref" >> "$GITHUB_OUTPUT"
+          echo "digest=${ref#*@}" >> "$GITHUB_OUTPUT"
+
+      # Signed SLSA build provenance: which commit and workflow built these
+      # exact bytes. Kept on GitHub (Sigstore-signed); every release checks it.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
 
   dev:
     needs: build

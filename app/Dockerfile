@@ -6,7 +6,7 @@ ARG BUILDPLATFORM=linux/amd64
 
 # Build on the runner's native platform and cross-compile, so building an
 # amd64 image on an arm64 Mac doesn't need emulation.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG VERSION=dev

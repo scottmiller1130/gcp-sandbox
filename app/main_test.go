@@ -178,3 +178,23 @@ func TestParseTraceContext(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestValuesAreSafeToLog(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("traceparent", "00-"+strings.Repeat("z", 32)+"-0123456789abcdef-01")
+	if id, _ := parseTraceContext(r); id != "" {
+		t.Fatalf("accepted a non-hex trace id: %q", id)
+	}
+	r.Header.Del("traceparent")
+	r.Header.Set("X-Cloud-Trace-Context", "evil\ninjected/1;o=1")
+	if id, _ := parseTraceContext(r); id != "" {
+		t.Fatalf("accepted a forged trace id: %q", id)
+	}
+	r.Header.Set("X-Forwarded-For", "1.2.3.4\nfake log line, 203.0.113.9")
+	if ip := clientIP(r); ip != "203.0.113.9" {
+		t.Fatalf("clientIP = %q", ip)
+	}
+	if got := logSafe("a\r\nb"); got != "ab" {
+		t.Fatalf("logSafe = %q", got)
+	}
+}

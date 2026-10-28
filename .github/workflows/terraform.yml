@@ -12,7 +12,7 @@ name: Terraform
 #                  sign-off -> apply the saved plan -> check the live site.
 #                  The first failure stops the rest, so a change that hurts dev
 #                  never reaches prod.
-#   Mondays        drift check: fail if the cloud no longer matches the code.
+#   daily          drift check: fail if the cloud no longer matches the code.
 #
 # The bootstrap layer is deliberately not here: it creates CI's own identities,
 # so a human applies it. See docs/terraform.md.
@@ -24,7 +24,7 @@ on:
     branches: [main]
     paths: [terraform/**, .github/workflows/terraform.yml]
   schedule:
-    - cron: "0 15 * * 1"
+    - cron: "0 15 * * *"
   workflow_dispatch:
 
 permissions:
@@ -35,6 +35,9 @@ permissions:
 env:
   TF_IN_AUTOMATION: "true"
   TF_INPUT: "false"
+  # Where alerts are emailed. A secret, and a sensitive Terraform variable:
+  # masked in logs, redacted from plans and the review comments.
+  TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
 
 jobs:
   plan:
@@ -78,6 +81,7 @@ jobs:
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
           [ "$code" -ne 1 ] # 0 = no changes, 2 = changes, 1 = error
           terraform show -json tfplan > plan.json
+          python3 "$GITHUB_WORKSPACE/scripts/tf_risk.py" redact plan.json # public repo: artifacts are downloadable
 
       - name: Summarise
         if: always() && steps.plan.outcome != 'skipped'
@@ -224,6 +228,7 @@ jobs:
           echo "exitcode=$code" >> "$GITHUB_OUTPUT"
           [ "$code" -ne 1 ]
           terraform show -json tfplan > plan.json
+          python3 "$GITHUB_WORKSPACE/scripts/tf_risk.py" redact plan.json # public repo: artifacts are downloadable
 
       - name: Find the pull request's review and sign-off
         if: steps.plan.outputs.exitcode == '2'

@@ -16,6 +16,7 @@ from the code, so changing any of them shows up:
 | Secret versions | `google_secret_manager_secret_version` × environments | 6 |
 | Image storage | Artifact Registry `keep_count` × ~12 MB | 0.5 GB |
 | Always-on instances | `min_instance_count` | none: billed every second |
+| Alert conditions | every condition in `google_monitoring_alert_policy` (log alerts count per entry) | free until 1 Sep 2027, then $0.35/month each |
 | Free viewing hours | Mission Control's `POLL_MS` and `FLIGHT_POLL_MS`, plus CPU and memory per instance | 2M requests, 180k vCPU-s, 360k GiB-s a month |
 
 "Worst case" means every limit is hit at once: all instances running all day, every cap used up.

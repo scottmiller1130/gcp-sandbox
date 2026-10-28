@@ -68,7 +68,9 @@ PRICE = {
     "scheduler_job": 0.10,         # per job per month
     "secret_version": 0.06,        # per active version per month
     "ar_gb": 0.10,                 # per GB per month
+    "alert_condition": 0.35,       # per condition per month, from ALERTING_BILLED_FROM
 }
+ALERTING_BILLED_FROM = "2027-09-01"  # Google Cloud Observability pricing: alerting policies
 FREE = {
     "run_vcpu_s": 180_000, "run_gib_s": 360_000, "run_requests": 2_000_000,  # per month, per billing account
     "fs_reads": 50_000, "fs_writes": 20_000,                                  # per day, per project
@@ -163,7 +165,27 @@ def resources(root: str) -> list[Resource]:
         return 0 if re.search(r"count\s*=\s*0\b", body) else 1
 
     def file_resources(path: str, copies: int, where: str) -> list[Resource]:
-        return [Resource(t, n, where, copies * mult(b), b) for t, n, b in blocks(_read(path), "resource")]
+        text = _read(path)
+        out = []
+        for t, n, b in blocks(text, "resource"):
+            k = mult(b)
+            # for_each over a local map in the same file: one copy per entry.
+            fe = re.search(r"for_each\s*=(.*)", b)
+            names = re.findall(r"local\.(\w+)", fe.group(1)) if fe and not per_env.search(b) else []
+            maps = [re.search(rf"^\s*{name}\s*=\s*\{{", text, re.M) for name in names]
+            body = next((x for x in maps if x), None)
+            if body:
+                depth, i, entries = 1, body.end(), 0
+                while depth and i < len(text):
+                    if text[i] == "{":
+                        depth += 1
+                        entries += depth == 2
+                    elif text[i] == "}":
+                        depth -= 1
+                    i += 1
+                k = max(entries, 1)
+            out.append(Resource(t, n, where, copies * k, b))
+        return out
 
     stacks = [os.path.join(tf, d) for d in ("bootstrap", "platform")] + [os.path.join(tf, "envs", e) for e in envs]
     stacks += sorted(p for p in glob.glob(os.path.join(root, "labs", "*")) if os.path.isdir(p))
@@ -324,7 +346,23 @@ def metrics(base: Model, head: Model) -> list[Metric]:
                       how=(f"{requests_per_viewer_hour(head) or 0:,.0f} requests per hour one Mission Control tab is open; each billed as "
                            f"{BILLED_REQUEST_S * 1000:g} ms of {head.cpu:g} vCPU / {head.mem_gib:g} GiB. "
                            f"After that, ~${usd_per_1000_viewer_hours(head) or 0:.2f} per 1,000 viewing hours")))
+    ba, ha = alert_conditions(base), alert_conditions(head)
+    billed = today() >= ALERTING_BILLED_FROM
+    out.append(Metric("alerts", "Alert conditions", "", "all projects", None, ba, ha,
+                      ba * PRICE["alert_condition"] if billed else 0.0, ha * PRICE["alert_condition"] if billed else 0.0,
+                      f"each condition in an alert policy; free until {ALERTING_BILLED_FROM}, then "
+                      f"${PRICE['alert_condition']:.2f}/month each: ~${ha * PRICE['alert_condition']:.2f}/month for this version"))
     return out
+
+
+def today() -> str:
+    import datetime
+    return datetime.date.today().isoformat()
+
+
+def alert_conditions(m: Model) -> int:
+    return sum(r.copies * max(len(re.findall(r"\bconditions\s*\{", r.body)), 1)
+               for r in m.res if r.type == "google_monitoring_alert_policy")
 
 
 def billable_findings(base: Model, head: Model) -> list[dict]:

@@ -3,6 +3,11 @@ resource "google_project_service" "compute" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "iap" {
+  service            = "iap.googleapis.com"
+  disable_on_destroy = false
+}
+
 resource "google_compute_network" "sandbox" {
   name                    = "sandbox-vpc"
   auto_create_subnetworks = false
@@ -30,13 +35,14 @@ resource "google_compute_firewall" "iap_ssh" {
 
 resource "google_compute_instance" "vm" {
   name         = "sandbox-vm"
-  machine_type = "e2-micro"
+  machine_type = "e2-micro" # free tier: one e2-micro per month
   zone         = "${var.region}-a"
 
   boot_disk {
     initialize_params {
       image = "debian-cloud/debian-12"
       size  = 10
+      type  = "pd-standard" # free tier only covers standard disks
     }
   }
 

@@ -29,11 +29,30 @@ Each folder under `labs/` is self-contained: create it, poke at it, destroy it.
 4. **Set a budget alert** so a forgotten VM can't surprise you:
    Console → Billing → Budgets & alerts → create a $10 budget on this project.
 
+## Staying free
+
+Sandbox project: **`gcp-sandbox-78tvq4`** on the **Sandbox** billing account, with a $1 budget that
+emails at 10¢, 50¢, $1 and if spend is *forecast* to pass 10¢.
+
+The labs are built to fit the [always-free tier](https://cloud.google.com/free/docs/free-cloud-features):
+
+- Regions are locked to `us-central1`, `us-east1`, `us-west1` (Terraform rejects others).
+- **One** e2-micro VM at a time, with a `pd-standard` disk up to 30 GB. A second VM, a bigger
+  machine type or an SSD/balanced disk costs money.
+- No public IPs on VMs - an in-use external IPv4 address is billed. SSH goes through IAP (free).
+- Cloud Storage: up to 5 GB of Standard storage. Cloud Run: scales to zero, well under 2M requests/month.
+
+Things that cost money, so avoid them here unless you accept a small bill: Cloud NAT, load
+balancers, Cloud SQL, reserved static IPs, egress beyond 1 GB/month, and GKE. The free tier
+waives the management fee for one GKE cluster, but its nodes (or Autopilot pods) are still billed.
+
+A budget only *alerts* - it does not stop spending. **Always `terraform destroy` when you finish a lab.**
+
 ## Running a lab
 
 ```bash
 cd labs/01-storage-bucket
-cp terraform.tfvars.example terraform.tfvars   # put your project ID in it
+cp terraform.tfvars.example terraform.tfvars   # already set to the sandbox project
 terraform init
 terraform plan      # see what will be created
 terraform apply     # create it

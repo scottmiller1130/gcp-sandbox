@@ -3,8 +3,9 @@ resource "random_id" "suffix" {
 }
 
 resource "google_storage_bucket" "sandbox" {
-  name     = "${var.project_id}-sandbox-${random_id.suffix.hex}"
-  location = var.region
+  name          = "${var.project_id}-sandbox-${random_id.suffix.hex}"
+  location      = var.region
+  storage_class = "STANDARD" # free tier: 5 GB-months of Standard storage
 
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"

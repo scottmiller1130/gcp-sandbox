@@ -14,6 +14,8 @@ Each folder under `labs/` is self-contained: create it, poke at it, destroy it.
   to a write-once vault and a restore drill.
 - **[Customer journey impact](docs/customer-journey.md)**: every PR is walked through the visitor's journey
   on main and on the PR, and gets a comment on what a customer will notice.
+- **[Cost impact](docs/cost.md)**: every PR shows its worst-case use of each free tier on main vs the PR,
+  flags anything billable, and blocks charges until they're signed off.
 - **[Terraform layout](docs/terraform.md)**: bootstrap, platform and per-environment layers, reusable
   modules, and plan-on-PR / apply-on-merge.
 

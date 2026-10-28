@@ -1,8 +1,8 @@
 // Command server is a small, hardened web app for Cloud Run.
 //
-// It serves a public page that shows which revision and instance handled the
-// request, so canary and blue/green rollouts are visible in the browser, plus a
-// few endpoints used by CI and load tests.
+// Its homepage is "Mission Control": a live view of the app's own internals -
+// which instance and revision answered, what each instance is doing, how a
+// request travels, and how traffic moves during a rollout.
 //
 // Run as "server maintenance" it is instead a one-shot Cloud Run Job that
 // prunes old revisions (see maintenance.go).
@@ -13,12 +13,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log/slog"
 	mrand "math/rand/v2"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -41,6 +43,14 @@ const maxWorkMS = 1000
 // Logs with this @type show up in Error Reporting, grouped by service and version.
 const errorReportingType = "type.googleapis.com/google.devtools.clouderrorreporting.v1beta1.ReportedErrorEvent"
 
+// Scripts and styles come only from these files - no inline code - so the
+// Content-Security-Policy can stay strict.
+const csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; " +
+	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+//go:embed static
+var staticFiles embed.FS
+
 type info struct {
 	Service  string `json:"service"`
 	Version  string `json:"version"`
@@ -50,59 +60,64 @@ type info struct {
 }
 
 type app struct {
-	service    string
-	revision   string
-	instance   string
-	project    string  // for linking logs to Cloud Trace; empty when running locally
-	errorRate  float64 // fraction of requests to fail on purpose; for testing rollbacks
-	adminToken string  // from Secret Manager; empty disables /admin
-	started    time.Time
-	requests   atomic.Int64
-	injected   atomic.Int64
-	style      template.CSS
-	csp        string
-	page       *template.Template
+	service     string
+	revision    string
+	instance    string
+	environment string  // dev / prod, set by CI at deploy time
+	project     string  // for linking logs to Cloud Trace; empty when running locally
+	errorRate   float64 // fraction of requests to fail on purpose; for testing rollbacks
+	adminToken  string  // from Secret Manager; empty disables /admin
+	hue         int     // accent colour, derived from the version
+
+	started      time.Time
+	readyAfter   time.Duration
+	firstRequest sync.Once
+
+	requests  atomic.Int64
+	inFlight  atomic.Int64
+	injected  atomic.Int64
+	status2xx atomic.Int64
+	status4xx atomic.Int64
+	status5xx atomic.Int64
+	feed      *ring[requestRecord]
+	events    *ring[event]
+
+	page *template.Template
 }
 
 func newApp(getenv func(string) string) *app {
 	a := &app{
-		service:    orDefault(getenv("K_SERVICE"), "local"),
-		revision:   orDefault(getenv("K_REVISION"), "local"),
-		instance:   randomID(),
-		project:    getenv("GOOGLE_CLOUD_PROJECT"),
-		adminToken: strings.TrimSpace(getenv("ADMIN_TOKEN")),
-		started:    time.Now(),
+		service:     orDefault(getenv("K_SERVICE"), "local"),
+		revision:    orDefault(getenv("K_REVISION"), "local"),
+		instance:    randomID(),
+		environment: orDefault(getenv("APP_ENV"), "local"),
+		project:     getenv("GOOGLE_CLOUD_PROJECT"),
+		adminToken:  strings.TrimSpace(getenv("ADMIN_TOKEN")),
+		started:     time.Now(),
+		feed:        newRing[requestRecord](feedSize),
 	}
 	if r, err := strconv.ParseFloat(getenv("ERROR_RATE"), 64); err == nil {
 		a.errorRate = min(max(r, 0), 1)
 	}
-
 	// Each version gets its own accent colour so a rollout is easy to see.
 	sum := sha256.Sum256([]byte(version))
-	hue := int(sum[0]) * 360 / 256
-	css := fmt.Sprintf(`body{margin:0;font:16px/1.5 system-ui,sans-serif;background:#f6f7f9;color:#1b1f24}`+
-		`main{max-width:40rem;margin:10vh auto;padding:2rem;background:#fff;border-radius:12px;border-top:8px solid hsl(%d 70%% 45%%)}`+
-		`h1{margin-top:0}dl{display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem}dt{color:#57606a}dd{margin:0;font-family:ui-monospace,monospace}`+
-		`@media (prefers-color-scheme:dark){body{background:#0d1117;color:#e6edf3}main{background:#161b22}dt{color:#8b949e}}`, hue)
-	a.style = template.CSS(css)
-
-	// Allow only this exact inline stylesheet; no scripts, frames or other origins.
-	h := sha256.Sum256([]byte(css))
-	a.csp = "default-src 'none'; style-src 'sha256-" + base64.StdEncoding.EncodeToString(h[:]) + "'; " +
-		"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-
+	a.hue = int(sum[0]) * 360 / 256
 	a.page = template.Must(template.New("page").Parse(pageHTML))
 	return a
 }
 
 func (a *app) routes() http.Handler {
+	static, _ := fs.Sub(staticFiles, "static")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.healthz)
 	mux.HandleFunc("GET /admin", a.admin)
+	mux.HandleFunc("GET /api/stats", a.stats)
+	mux.HandleFunc("GET /theme.css", a.theme)
+	mux.Handle("GET /static/", noListing(cacheable(http.StripPrefix("/static/", http.FileServerFS(static)))))
 	mux.HandleFunc("GET /api/info", a.faults(a.apiInfo))
 	mux.HandleFunc("GET /work", a.faults(a.work))
 	mux.HandleFunc("GET /{$}", a.faults(a.index))
-	return a.secureHeaders(mux)
+	return a.observe(a.secureHeaders(mux))
 }
 
 func (a *app) info() info {
@@ -172,12 +187,27 @@ func (a *app) work(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// theme is a tiny stylesheet carrying this version's accent colour, so the
+// colour can change per release without inline styles.
+func (a *app) theme(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	fmt.Fprintf(w, ":root{--accent-h:%d;--accent:hsl(%d 75%% 58%%)}\n", a.hue, a.hue)
+}
+
 func (a *app) index(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	traceID, _ := parseTraceContext(r)
+	now := time.Now().UTC()
 	if err := a.page.Execute(w, struct {
 		info
-		Style template.CSS
-	}{a.info(), a.style}); err != nil {
+		Environment string
+		TraceID     string
+		Project     string
+		Hue         int
+		ServedAt    string
+		ServedDate  string
+	}{a.info(), a.environment, traceID, a.project, a.hue, now.Format("15:04:05.000") + " UTC", now.Format("Mon 2 Jan 2006")}); err != nil {
 		a.log(r).Error("render page", "err", err)
 	}
 }
@@ -229,6 +259,7 @@ func (a *app) faults(next http.HandlerFunc) http.HandlerFunc {
 		if a.errorRate > 0 && mrand.Float64() < a.errorRate {
 			a.injected.Add(1)
 			a.log(r).Error("injected failure on "+r.URL.Path,
+				"path", r.URL.Path,
 				"@type", errorReportingType,
 				"serviceContext", map[string]string{"service": a.service, "version": version},
 				"context", map[string]any{"httpRequest": map[string]any{"method": r.Method, "url": r.URL.Path, "responseStatusCode": 500}},
@@ -247,7 +278,7 @@ func (a *app) secureHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.requests.Add(1)
 		h := w.Header()
-		h.Set("Content-Security-Policy", a.csp)
+		h.Set("Content-Security-Policy", csp)
 		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
@@ -257,6 +288,26 @@ func (a *app) secureHeaders(next http.Handler) http.Handler {
 		h.Set("Cache-Control", "no-store")
 		h.Set("X-Revision", a.revision)
 		h.Set("X-Instance", a.instance)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// noListing serves files but never a directory index.
+func noListing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// cacheable lets browsers keep static files briefly. URLs carry the version
+// (?v=...), so a new release is fetched straight away.
+func cacheable(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=3600")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -284,7 +335,9 @@ func randomID() string {
 
 func main() {
 	// Cloud Logging reads "severity" and "message" from JSON lines on stdout.
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	// A copy of each line also goes to the in-memory event log Mission Control shows.
+	events := newRing[event](eventsSize)
+	slog.SetDefault(slog.New(teeHandler{slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 			switch a.Key {
 			case slog.LevelKey:
@@ -294,7 +347,7 @@ func main() {
 			}
 			return a
 		},
-	})))
+	}), events}))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -308,6 +361,7 @@ func main() {
 	}
 
 	a := newApp(os.Getenv)
+	a.events = events
 	srv := &http.Server{
 		Addr:              ":" + orDefault(os.Getenv("PORT"), "8080"),
 		Handler:           a.routes(),
@@ -318,6 +372,7 @@ func main() {
 		MaxHeaderBytes:    16 << 10,
 	}
 
+	a.readyAfter = time.Since(a.started)
 	go func() {
 		slog.Info("listening", "addr", srv.Addr, "version", version, "revision", a.revision,
 			"instance", a.instance, "error_rate", a.errorRate, "admin_enabled", a.adminToken != "")
@@ -330,33 +385,10 @@ func main() {
 	// Cloud Run sends SIGTERM and allows ~10s before killing the instance:
 	// stop accepting new connections and let in-flight requests finish.
 	<-ctx.Done()
-	slog.Info("shutting down")
+	slog.Info("shutting down: Cloud Run is scaling this instance in")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown", "err", err)
 	}
 }
-
-const pageHTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hello from Cloud Run</title>
-<style>{{.Style}}</style>
-</head>
-<body>
-<main>
-<h1>Hello from Cloud Run</h1>
-<p>Reload a few times during a rollout to see traffic move between revisions.</p>
-<dl>
-<dt>Version</dt><dd>{{.Version}}</dd>
-<dt>Revision</dt><dd>{{.Revision}}</dd>
-<dt>Instance</dt><dd>{{.Instance}}</dd>
-<dt>Served at</dt><dd>{{.Time}}</dd>
-</dl>
-</main>
-</body>
-</html>
-`

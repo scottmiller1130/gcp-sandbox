@@ -1,0 +1,69 @@
+name: Promote
+
+# Blue/green cutover: send 100% of traffic to the "green" revision left by a
+# blue-green deploy. The old revision stays tagged "previous" for Rollback.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  REGION: ${{ vars.GCP_REGION }}
+  SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Find blue and green
+        id: find
+        run: |
+          svc=$(gcloud run services describe "$SERVICE" --region "$REGION" --format json)
+          green=$(jq -r '.status.traffic[] | select(.tag == "green") | .revisionName' <<<"$svc")
+          green_url=$(jq -r '.status.traffic[] | select(.tag == "green") | .url' <<<"$svc")
+          blue=$(jq -r '[.status.traffic[] | select(.percent > 0)] | max_by(.percent) | .revisionName' <<<"$svc")
+          [ -n "$green" ] || { echo "::error::No green revision - run Deploy with strategy blue-green first"; exit 1; }
+          [ "$green" != "$blue" ] || { echo "::error::$green is already serving production"; exit 1; }
+          echo "Blue: $blue  Green: $green"
+          {
+            echo "green=$green"
+            echo "green_url=$green_url"
+            echo "blue=$blue"
+            echo "url=$(jq -r '.status.url' <<<"$svc")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Final check on green
+        run: scripts/verify.sh "${{ steps.find.outputs.green_url }}" 50 1
+
+      - name: Cut over
+        run: |
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --update-tags "previous=${{ steps.find.outputs.blue }}" \
+            --remove-tags green \
+            --to-revisions "${{ steps.find.outputs.green }}=100" --quiet
+          sleep 15
+          scripts/verify.sh "${{ steps.find.outputs.url }}" 100 1
+
+      - name: Switch back to blue on failure
+        if: failure() && steps.find.outcome == 'success'
+        run: |
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --to-revisions "${{ steps.find.outputs.blue }}=100" --quiet
+
+      - name: Summary
+        if: always()
+        run: |
+          { echo '```'; scripts/traffic.sh "$SERVICE" "$REGION"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

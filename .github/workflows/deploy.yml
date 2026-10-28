@@ -1,0 +1,195 @@
+name: Deploy
+
+# Build -> deploy a no-traffic candidate -> smoke test it -> release.
+#
+#   canary      shift traffic in steps (default 10 -> 50 -> 100), checking the
+#               new revision's error rate at each step; roll back on failure
+#   blue-green  stop with the new revision ("green") live on its own URL at 0%;
+#               run the Promote workflow to cut over, Rollback to undo
+#   direct      straight to 100% after the smoke test
+#
+# Pushes to main use canary.
+on:
+  push:
+    branches: [main]
+    paths: [app/**, scripts/**, .github/workflows/deploy.yml]
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: Release strategy
+        type: choice
+        options: [canary, blue-green, direct]
+        default: canary
+      canary_steps:
+        description: Canary traffic steps (percent, space separated, must end in 100)
+        default: "10 50 100"
+      error_rate:
+        description: "Make the new revision fail this fraction of requests (0-1). Try 0.1 to watch a canary abort, 1 to watch the smoke test block it."
+        default: "0"
+
+permissions:
+  contents: read
+  id-token: write # for Workload Identity Federation
+
+# One release at a time; never cancel one halfway through a traffic shift.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION }}
+  SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+  IMAGE: ${{ vars.GCP_AR_REPO }}/${{ vars.CLOUD_RUN_SERVICE }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+          cache: false
+      - name: Test
+        working-directory: app
+        run: go test -race -count=1 ./...
+
+      - id: version
+        run: echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push
+        id: push
+        working-directory: app
+        run: |
+          tag="$IMAGE:${{ steps.version.outputs.version }}"
+          docker build --build-arg VERSION=${{ steps.version.outputs.version }} -t "$tag" .
+          docker push "$tag"
+          # Deploy by digest: the exact bytes that were tested, not a movable tag.
+          echo "image=$(docker inspect --format '{{index .RepoDigests 0}}' "$tag")" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      STRATEGY: ${{ inputs.strategy || 'canary' }}
+      CANARY_STEPS: ${{ inputs.canary_steps || '10 50 100' }}
+      ERROR_RATE: ${{ inputs.error_rate || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Record the revision currently serving production
+        id: current
+        run: |
+          rev=$(gcloud run services describe "$SERVICE" --region "$REGION" --format json \
+            | jq -r '[.status.traffic[] | select(.percent > 0)] | max_by(.percent) | .revisionName // empty')
+          url=$(gcloud run services describe "$SERVICE" --region "$REGION" --format 'value(status.url)')
+          echo "Production revision: ${rev:-none}"
+          echo "revision=$rev" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy candidate with no traffic
+        id: candidate
+        run: |
+          suffix="${{ needs.build.outputs.version }}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          gcloud run deploy "$SERVICE" --region "$REGION" \
+            --image "${{ needs.build.outputs.image }}" \
+            --revision-suffix "$suffix" \
+            --update-env-vars "ERROR_RATE=$ERROR_RATE" \
+            --no-traffic --tag candidate --quiet
+          url=$(gcloud run services describe "$SERVICE" --region "$REGION" --format json \
+            | jq -r '.status.traffic[] | select(.tag == "candidate") | .url')
+          echo "revision=$SERVICE-$suffix" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Candidate $SERVICE-$suffix is live at $url"
+
+      - name: Smoke test candidate on its private URL
+        run: |
+          curl -fsS --retry 3 "${{ steps.candidate.outputs.url }}/" -o /dev/null
+          scripts/verify.sh "${{ steps.candidate.outputs.url }}" 50 20
+
+      - name: Keep the old revision addressable for rollback
+        if: steps.current.outputs.revision != ''
+        run: |
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --update-tags "previous=${{ steps.current.outputs.revision }}" --quiet
+
+      - name: Canary rollout
+        if: env.STRATEGY == 'canary'
+        env:
+          NEW: ${{ steps.candidate.outputs.revision }}
+          URL: ${{ steps.current.outputs.url }}
+        run: |
+          for pct in $CANARY_STEPS; do
+            echo "::group::$pct% to $NEW"
+            gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+              --to-revisions "$NEW=$pct" --quiet
+            sleep 15 # let the routing change settle
+            if [ "$pct" -lt 100 ]; then
+              # Judge the new revision on its own responses: <=5% errors.
+              scripts/verify.sh "$URL" 300 5 "$NEW"
+              sleep 30 # bake time before the next step
+            else
+              scripts/verify.sh "$URL" 100 1
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Blue/green - leave green ready for cutover
+        if: env.STRATEGY == 'blue-green'
+        run: |
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --update-tags "green=${{ steps.candidate.outputs.revision }}" --quiet
+          green_url=$(gcloud run services describe "$SERVICE" --region "$REGION" --format json \
+            | jq -r '.status.traffic[] | select(.tag == "green") | .url')
+          {
+            echo "### Green is ready"
+            echo "- Blue (production, 100%): ${{ steps.current.outputs.url }}"
+            echo "- Green (0%): $green_url"
+            echo
+            echo "Test green, then run the **Promote** workflow to cut over."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Direct rollout
+        if: env.STRATEGY == 'direct'
+        run: |
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --to-revisions "${{ steps.candidate.outputs.revision }}=100" --quiet
+          sleep 15
+          scripts/verify.sh "${{ steps.current.outputs.url }}" 100 1
+
+      - name: Roll back on failure
+        if: failure() && steps.candidate.outcome == 'success' && steps.current.outputs.revision != ''
+        run: |
+          echo "::error::Release failed - sending 100% back to ${{ steps.current.outputs.revision }}"
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --to-revisions "${{ steps.current.outputs.revision }}=100" --quiet
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Release (${STRATEGY})"
+            echo "- Image: \`${{ needs.build.outputs.image }}\`"
+            echo "- Candidate: \`${{ steps.candidate.outputs.revision }}\` (error_rate=$ERROR_RATE)"
+            echo "- Previous: \`${{ steps.current.outputs.revision }}\`"
+            echo
+            echo '```'
+            scripts/traffic.sh "$SERVICE" "$REGION" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,45 @@
+name: Rollback
+
+# Instantly send 100% of traffic back to the revision tagged "previous".
+# No rebuild: the old revision is still deployed, so this takes seconds.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  REGION: ${{ vars.GCP_REGION }}
+  SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Roll back
+        run: |
+          svc=$(gcloud run services describe "$SERVICE" --region "$REGION" --format json)
+          prev=$(jq -r '.status.traffic[] | select(.tag == "previous") | .revisionName' <<<"$svc")
+          [ -n "$prev" ] || { echo "::error::No revision tagged 'previous'"; exit 1; }
+          echo "Sending 100% to $prev"
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --to-revisions "$prev=100" --quiet
+          sleep 15
+          scripts/verify.sh "$(jq -r '.status.url' <<<"$svc")" 50 1
+
+      - name: Summary
+        if: always()
+        run: |
+          { echo '```'; scripts/traffic.sh "$SERVICE" "$REGION"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

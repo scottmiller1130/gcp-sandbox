@@ -6,6 +6,11 @@ Each folder under `labs/` is self-contained: create it, poke at it, destroy it.
 > For the production-style GKE platform, see [scottmiller1130/GCP](https://github.com/scottmiller1130/GCP).
 > Nothing here touches that.
 
+## Apps
+
+- **[hello-web](docs/cloud-run-app.md)**: a public site on Cloud Run with CI/CD (canary, blue/green, rollback)
+  and load testing. Code in `app/`, infrastructure in `infra/`, pipelines in `.github/workflows/`.
+
 ## One-time setup
 
 1. **Install tools**

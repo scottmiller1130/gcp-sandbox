@@ -12,3 +12,6 @@ crash.log
 !**/package.json
 
 .DS_Store
+
+# Terraform plan files
+tfplan

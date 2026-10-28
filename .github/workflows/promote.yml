@@ -29,6 +29,8 @@ env:
 jobs:
   promote:
     runs-on: ubuntu-latest
+    # Cutting prod over is a prod change: it waits for the `prod` reviewer.
+    environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2

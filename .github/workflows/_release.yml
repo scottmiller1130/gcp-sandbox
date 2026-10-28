@@ -51,6 +51,9 @@ jobs:
   release:
     name: ${{ inputs.environment }} (${{ inputs.strategy }})
     runs-on: ubuntu-latest
+    # The `prod` environment waits for a required reviewer before this job
+    # starts; the approval is recorded on the run.
+    environment: ${{ inputs.environment }}
     # One release per environment at a time; never cancel one mid traffic shift.
     concurrency:
       group: release-${{ inputs.environment }}

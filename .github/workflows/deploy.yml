@@ -39,6 +39,8 @@ permissions:
   contents: read
   id-token: write
   attestations: read # each release checks the image's build provenance
+  pull-requests: read # the change ledger records the PR and its approvals
+  actions: read       # ...and who approved the deployment
 
 # One release at a time: two overlapping canaries would fight over the same
 # traffic split. A later push waits for the running release, never cancels it.
@@ -129,3 +131,33 @@ jobs:
       strategy: ${{ inputs.strategy || 'canary' }}
       canary_steps: ${{ inputs.canary_steps || '10 50 100' }}
       error_rate: ${{ inputs.error_rate || '0' }}
+
+  # Every prod release becomes a GitHub Release: what shipped, from which PRs,
+  # with its provenance. Release tags are protected, so one can't be rewritten.
+  publish:
+    needs: [build, prod]
+    if: needs.prod.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          REVISION: ${{ needs.prod.outputs.revision }}
+        run: |
+          tag="release-$(date -u +%Y%m%d-%H%M)-${GITHUB_SHA::7}"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "Released to **prod** by canary, with the prod approval recorded in [run ${GITHUB_RUN_ID}](${run_url})."
+            echo
+            echo "- Revision: \`${REVISION}\`"
+            echo "- Image: \`${IMAGE}\`"
+            echo "- Verify its build provenance: \`gh attestation verify oci://${IMAGE} --repo ${GITHUB_REPOSITORY}\`"
+          } > notes.md
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$tag" --notes-file notes.md --generate-notes --latest

@@ -31,6 +31,7 @@ permissions:
   contents: read
   id-token: write
   pull-requests: write
+  actions: read # the change ledger records who approved the prod deployment
 
 env:
   TF_IN_AUTOMATION: "true"
@@ -255,6 +256,7 @@ jobs:
 
       # The saved plan: exactly what was gated, nothing that appeared since.
       - name: Apply
+        id: apply
         if: steps.plan.outputs.exitcode == '2'
         run: terraform apply -no-color tfplan
 
@@ -268,3 +270,16 @@ jobs:
             echo "::error::${{ matrix.env }} is failing requests after this apply. Later layers were not applied. Revert the PR, or run the Rollback workflow if a release is at fault."
             exit 1
           }
+
+      - name: Record in the change ledger
+        # A ledger problem is flagged on the run, but never fails a change that
+        # already happened.
+        continue-on-error: true
+        if: always() && steps.plan.outputs.exitcode == '2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LEDGER_BUCKET: ${{ vars.LEDGER_BUCKET }}
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/ledger.py" record --kind terraform-apply \
+            --environment "${{ matrix.env }}" --outcome "${{ steps.apply.outcome }}" \
+            --detail "stack=${{ matrix.stack }}" --detail "plan_sha256=$(sha256sum tfplan | cut -c1-64)"

@@ -70,8 +70,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r scripts/requirements-tf-risk.txt
-      - name: Risk engine, customer journey and cost tests
-        run: python -W error::ResourceWarning -m unittest -v scripts/test_tf_risk.py scripts/test_journey.py scripts/test_cost.py
+      - name: Risk engine, customer journey, cost and ledger tests
+        run: python -W error::ResourceWarning -m unittest -v scripts/test_tf_risk.py scripts/test_journey.py scripts/test_cost.py scripts/test_ledger.py
 
   terraform:
     runs-on: ubuntu-latest

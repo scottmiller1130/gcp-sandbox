@@ -8,36 +8,35 @@ stay inside the GCP free tier.
  push to main / Run workflow
             │
             ▼
- ┌─ GitHub Actions ─────────────────────────────────────────────┐
- │ test → build → push image ──► Artifact Registry (apps/)      │
- │        │                                                     │
- │        ▼  (keyless auth: Workload Identity Federation)       │
- │ deploy revision with 0% traffic, tag "candidate"             │
- │ smoke test candidate URL ── fail ──► stop, prod untouched    │
- │        │                                                     │
- │        ├─ canary:     10% → check → 50% → check → 100%       │
- │        │                 └── fail ──► 100% back to previous  │
- │        ├─ blue-green: green ready on its own URL → Promote   │
- │        └─ direct:     100% → check                           │
- └──────────────────────────────────────────────────────────────┘
-            │
-            ▼
- Cloud Run service hello-web (us-central1, 0-10 instances)
-   https://hello-web-….run.app            ← production traffic split
+ ┌─ GitHub Actions ───────────────────────────────────────────────────┐
+ │ test → build ONCE → push image ──► Artifact Registry (shared proj) │
+ │                │                                                   │
+ │                ▼  same digest, keyless auth per environment        │
+ │  dev:  candidate at 0% → smoke test → 100% → check                 │
+ │                │ (prod only starts if dev passed)                  │
+ │                ▼                                                   │
+ │  prod: candidate at 0% → smoke test → canary 10 → 50 → 100         │
+ │                              any failed gate ──► back to previous  │
+ └────────────────────────────────────────────────────────────────────┘
+
+ Each environment is its own GCP project with its own hello-web service:
+   https://hello-web-….run.app            ← traffic split
    https://candidate---hello-web-….run.app ← newest revision
    https://previous---hello-web-….run.app  ← rollback target
 ```
+
+Infrastructure layout and the Terraform pipeline are in [terraform.md](terraform.md).
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `app/` | Go web server + Dockerfile (distroless, non-root, ~17 MB) |
-| `infra/` | Terraform: Cloud Run, Artifact Registry, service accounts, GitHub trust |
+| `terraform/` | Infrastructure in layers: see [terraform.md](terraform.md) |
 | `.github/workflows/` | `ci`, `deploy`, `promote`, `rollback`, `loadtest` |
-| `infra/secrets.tf` | Secret Manager: the `/admin` token |
-| `infra/observability.tf` | Uptime check, alerts, SLOs, dashboard |
-| `infra/scheduler.tf` | Cloud Scheduler + Cloud Run Job that prunes old revisions |
+| `terraform/modules/cloud-run-service` | Service, runtime identity, Secret Manager admin token |
+| `terraform/modules/run-observability` | Uptime check, alerts, SLOs, dashboard |
+| `terraform/modules/revision-pruner` | Cloud Scheduler + Cloud Run Job that prunes old revisions |
 | `scripts/verify.sh` | Health gate used by every release step |
 | `loadtest/k6.js` | k6 load profile |
 
@@ -55,28 +54,31 @@ Every response carries `X-Revision` and `X-Instance` headers.
 
 ## Releasing
 
-Pushing a change under `app/` to `main` runs **Deploy** with a canary. To pick a
-strategy, go to **Actions → Deploy → Run workflow**:
+Pushing a change under `app/` to `main` builds the image once, releases it to
+**dev** (direct, smoke-tested), and then to **prod** with a canary. Prod never runs an
+image that didn't pass in dev. To choose how it goes, open **Actions → Deploy → Run workflow**:
 
-- **canary**: shifts traffic through `canary_steps` (default `10 50 100`). At each
-  step it sends 300 requests and fails if more than 5% of the *new revision's*
-  responses are errors, then waits 30 s. A failure sends 100% back to the previous revision.
-- **blue-green**: the new revision ("green") gets a URL of its own and 0% of traffic.
-  Click around it, load test it (`target: candidate`), then run **Promote**. Promote
-  checks green, switches 100% to it, and switches back if the check fails.
-- **direct**: goes straight to 100% after the smoke test.
+- **target**: `prod` (dev, then prod) or `dev` (stop after dev, using your strategy there)
+- **strategy**: used in the last environment:
+  - **canary**: shifts traffic through `canary_steps` (default `10 50 100`). At each
+    step it sends 300 requests and fails if more than 5% of the *new revision's*
+    responses are errors, then waits 30 s. A failure sends 100% back to the previous revision.
+  - **blue-green**: the new revision ("green") gets a URL of its own and 0% of traffic.
+    Click around it, load test it (`target: candidate`), then run **Promote**. Promote
+    checks green, switches 100% to it, and switches back if the check fails.
+  - **direct**: goes straight to 100% after the smoke test.
 
-**Rollback** (Actions → Rollback) sends 100% back to the revision tagged `previous`.
-Nothing gets rebuilt, so it takes seconds.
+**Rollback** (Actions → Rollback, pick the environment) sends 100% back to the revision
+tagged `previous`. Nothing gets rebuilt, so it takes seconds.
 
 ### Practise failures
 
 Deploy has an `error_rate` input that makes the new revision fail that fraction of
-requests (health checks keep passing):
+requests, **in the last environment only**, so dev stays healthy on the way to prod (health checks keep passing):
 
 | `error_rate` | What you'll see |
 |---|---|
-| `1` | Smoke test on the candidate URL fails. Production never sees it |
+| `1` | Smoke test on the candidate URL fails. Users never see it |
 | `0.1` | Smoke test passes (≤20%), the canary's 10% step catches it (>5%) and rolls back |
 | `0` | Normal release. Also clears a previous injected rate |
 
@@ -88,13 +90,13 @@ while true; do curl -s https://<service-url>/api/info | jq -r .revision; sleep 0
 
 ## Load testing
 
-**Actions → Load test → Run workflow.** It runs k6 from a GitHub runner, then reads
+**Actions → Load test → Run workflow** (pick dev or prod). It runs k6 from a GitHub runner, then reads
 Cloud Monitoring to report the peak instance count in the run summary.
 
 - With the defaults (50 users, `/work?ms=200`, concurrency 80) one or two instances can
   handle the load.
-- To watch it scale out, lower `concurrency` in `infra/variables.tf` to `5` and
-  apply. 50 users then need ~10 instances, which hits `max_instances`, and latency
+- To watch it scale out, set `concurrency = 5` on the `app` module in
+  `terraform/envs/prod/main.tf` and merge the change (the Terraform workflow applies it). 50 users then need ~10 instances, which hits `max_instances`, and latency
   rises because requests queue.
 - Try `path: /` to see how much a single instance handles when requests are cheap.
 
@@ -127,12 +129,12 @@ The `/admin` endpoint is protected by a bearer token stored in Secret Manager as
 - **Cloud Run injects it** as `ADMIN_TOKEN` when each instance starts, using the `latest` version.
 
 ```bash
-curl -s -H "Authorization: Bearer $(gcloud secrets versions access latest --secret hello-web-admin-token)" \
+curl -s -H "Authorization: Bearer $(gcloud secrets versions access latest --project <env project> --secret hello-web-admin-token)" \
   https://<service-url>/admin | jq
 ```
 
-**Rotate it:** bump `admin_token_version` in `infra/variables.tf`, `terraform apply`
-(a new version is created *before* the old one is destroyed), then run **Deploy**
+**Rotate it:** bump `admin_token_version` in `terraform/envs/<env>/main.tf`, merge (Terraform applies it;
+a new version is created *before* the old one is destroyed), then run **Deploy**
 (`direct`) so new instances start with the new token. Old instances keep the old token
 until Cloud Run replaces them.
 
@@ -143,7 +145,7 @@ rather than adding one, and each instance start counts as one access.
 
 | What | Where |
 |---|---|
-| **Dashboard** with requests, 5xx and p95 latency *by revision*, instances, uptime, maintenance runs | `terraform -chdir=infra output dashboard_url` |
+| **Dashboard** with requests, 5xx and p95 latency *by revision*, instances, uptime, maintenance runs | `terraform -chdir=terraform/envs/prod output dashboard_url` |
 | **Logs** as structured JSON, each line linked to its request's trace | Logging → Logs Explorer, `resource.labels.service_name="hello-web"` |
 | **Traces**: Cloud Run traces incoming requests automatically | Trace Explorer (open a trace to jump to its logs) |
 | **Error Reporting**: injected failures are reported grouped by *version* | Error Reporting |
@@ -151,13 +153,14 @@ rather than adding one, and each instance start counts as one access.
 | **Alerts**: site down (2+ locations failing) and 5xx rate above 5% | Monitoring → Alerting |
 | **SLOs**: 99% availability and 95% of requests under 1s, both over a rolling 7 days | Monitoring → Services → hello-web |
 
-Alerts open incidents in the console. To get emailed too, set `alert_email` (e.g.
-`terraform -chdir=infra apply -var alert_email=you@example.com`).
+Alerts open incidents in the console. To get emailed too, set the `alert_email`
+variable's default in `terraform/envs/<env>/main.tf`. Dev has no 5xx alert, because releases there
+are smoke-tested before prod and alerts in dev would be noise.
 
 Try it: run **Deploy** with `error_rate: 0.1` and `strategy: blue-green`, then load test
 `target: candidate`. The dashboard shows the 5xx line for the green revision only,
 Error Reporting groups the failures under green's version, and the 5xx alert fires.
-Production's SLO isn't affected because green receives no production traffic.
+Prod's SLO isn't affected because green receives no user traffic.
 
 Cost: uptime checks are free up to 1M runs/month (this one uses ~26k). Alerting is free
 until at least Sept 2027. After that the uptime alert stays free and the 5xx alert would be
@@ -178,13 +181,14 @@ Identities: the **scheduler** account can only start this job. The **job** accou
 only manage revisions of `hello-web`. CI updates the job's image after every release.
 
 ```bash
+export CLOUDSDK_CORE_PROJECT=<env project>                                     # dev or prod
 gcloud run jobs execute hello-web-maintenance --region us-central1 --wait      # run now
 gcloud run jobs execute hello-web-maintenance --region us-central1 \
   --update-env-vars DRY_RUN=true --wait                                         # preview only
 gcloud scheduler jobs run hello-web-maintenance-daily --location us-central1   # test the trigger
 ```
 
-Free tier: Scheduler gives 3 jobs per billing account (this uses 1). The job runs for
+Free tier: Scheduler gives 3 jobs per billing account (dev + prod use 2). The job runs for
 a few seconds a day.
 
 ## How infrastructure changes roll out
@@ -216,22 +220,6 @@ Setting it to 1 removes that, but you pay for an idle instance.
 - Terraform state bucket keeps 3 old versions
 - $1 budget alert on the project
 
-## First-time setup (already done for this sandbox)
+## First-time setup
 
-```bash
-# State bucket
-gcloud storage buckets create gs://gcp-sandbox-78tvq4-tfstate --location us-central1 \
-  --uniform-bucket-level-access --public-access-prevention
-gcloud storage buckets update gs://gcp-sandbox-78tvq4-tfstate --versioning
-
-# Infrastructure
-terraform -chdir=infra init
-terraform -chdir=infra apply
-
-# Hand the outputs to GitHub Actions
-terraform -chdir=infra output -json github_variables \
-  | jq -r 'to_entries[] | "\(.key) \(.value)"' \
-  | while read -r k v; do gh variable set "$k" --body "$v"; done
-```
-
-Then run **Deploy** once to replace the placeholder image with the real app.
+See [terraform.md](terraform.md#first-time-setup).

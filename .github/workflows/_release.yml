@@ -1,0 +1,172 @@
+name: Release (reusable)
+
+# Releases an already-built image to one environment. Called by Deploy for
+# dev and then prod, so both run exactly the same steps and gates.
+#
+#   candidate at 0%  ->  smoke test  ->  canary | blue-green | direct
+#   any failed gate  ->  100% back to the previous revision
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      project_id:
+        type: string
+        required: true
+      deployer_sa:
+        type: string
+        required: true
+      image:
+        description: Image by digest
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      strategy:
+        type: string
+        default: canary
+      canary_steps:
+        type: string
+        default: "10 50 100"
+      error_rate:
+        type: string
+        default: "0"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CLOUDSDK_CORE_PROJECT: ${{ inputs.project_id }}
+  REGION: ${{ vars.GCP_REGION }}
+  SERVICE: hello-web
+  JOB: hello-web-maintenance
+  STRATEGY: ${{ inputs.strategy }}
+  CANARY_STEPS: ${{ inputs.canary_steps }}
+  ERROR_RATE: ${{ inputs.error_rate }}
+
+jobs:
+  release:
+    name: ${{ inputs.environment }} (${{ inputs.strategy }})
+    runs-on: ubuntu-latest
+    # One release per environment at a time; never cancel one mid traffic shift.
+    concurrency:
+      group: release-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ inputs.deployer_sa }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Record the revision currently serving traffic
+        id: current
+        run: |
+          svc=$(gcloud run services describe "$SERVICE" --region "$REGION" --format json)
+          rev=$(jq -r '[.status.traffic[] | select(.percent > 0)] | max_by(.percent) | .revisionName // empty' <<<"$svc")
+          echo "Serving revision: ${rev:-none}"
+          echo "revision=$rev" >> "$GITHUB_OUTPUT"
+          echo "url=$(jq -r '.status.url' <<<"$svc")" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy candidate with no traffic
+        id: candidate
+        run: |
+          suffix="${{ inputs.version }}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          gcloud run deploy "$SERVICE" --region "$REGION" \
+            --image "${{ inputs.image }}" \
+            --revision-suffix "$suffix" \
+            --update-env-vars "ERROR_RATE=$ERROR_RATE" \
+            --no-traffic --tag candidate --quiet
+          url=$(gcloud run services describe "$SERVICE" --region "$REGION" --format json \
+            | jq -r '.status.traffic[] | select(.tag == "candidate") | .url')
+          echo "revision=$SERVICE-$suffix" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Candidate $SERVICE-$suffix is live at $url"
+
+      - name: Smoke test candidate on its private URL
+        run: |
+          curl -fsS --retry 3 "${{ steps.candidate.outputs.url }}/" -o /dev/null
+          scripts/verify.sh "${{ steps.candidate.outputs.url }}" 50 20
+
+      - name: Keep the old revision addressable for rollback
+        if: steps.current.outputs.revision != ''
+        run: |
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --update-tags "previous=${{ steps.current.outputs.revision }}" --quiet
+
+      - name: Canary rollout
+        if: env.STRATEGY == 'canary'
+        env:
+          NEW: ${{ steps.candidate.outputs.revision }}
+          URL: ${{ steps.current.outputs.url }}
+        run: |
+          for pct in $CANARY_STEPS; do
+            echo "::group::$pct% to $NEW"
+            gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+              --to-revisions "$NEW=$pct" --quiet
+            sleep 15 # let the routing change settle
+            if [ "$pct" -lt 100 ]; then
+              # Judge the new revision on its own responses: <=5% errors.
+              scripts/verify.sh "$URL" 300 5 "$NEW"
+              sleep 30 # bake time before the next step
+            else
+              scripts/verify.sh "$URL" 100 1
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Blue/green - leave green ready for cutover
+        if: env.STRATEGY == 'blue-green'
+        run: |
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --update-tags "green=${{ steps.candidate.outputs.revision }}" --quiet
+          green_url=$(gcloud run services describe "$SERVICE" --region "$REGION" --format json \
+            | jq -r '.status.traffic[] | select(.tag == "green") | .url')
+          {
+            echo "### Green is ready in ${{ inputs.environment }}"
+            echo "- Blue (100%): ${{ steps.current.outputs.url }}"
+            echo "- Green (0%): $green_url"
+            echo
+            echo "Test green, then run the **Promote** workflow (environment: ${{ inputs.environment }})."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Direct rollout
+        if: env.STRATEGY == 'direct'
+        run: |
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --to-revisions "${{ steps.candidate.outputs.revision }}=100" --quiet
+          sleep 15
+          scripts/verify.sh "${{ steps.current.outputs.url }}" 100 1
+
+      # Same binary, so the job always matches what the service runs. Not part
+      # of the release gate: a failure here shouldn't roll back a healthy release.
+      - name: Point the maintenance job at the new image
+        if: env.STRATEGY != 'blue-green'
+        continue-on-error: true
+        run: gcloud run jobs update "$JOB" --region "$REGION" --image "${{ inputs.image }}" --quiet
+
+      - name: Roll back on failure
+        if: failure() && steps.candidate.outcome == 'success' && steps.current.outputs.revision != ''
+        run: |
+          echo "::error::Release failed - sending 100% back to ${{ steps.current.outputs.revision }}"
+          gcloud run services update-traffic "$SERVICE" --region "$REGION" \
+            --to-revisions "${{ steps.current.outputs.revision }}=100" --quiet
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ inputs.environment }}: ${STRATEGY}"
+            echo "- Image: \`${{ inputs.image }}\`"
+            echo "- Candidate: \`${{ steps.candidate.outputs.revision }}\` (error_rate=$ERROR_RATE)"
+            echo "- Previous: \`${{ steps.current.outputs.revision }}\`"
+            echo "- URL: ${{ steps.current.outputs.url }}"
+            echo
+            echo '```'
+            scripts/traffic.sh "$SERVICE" "$REGION" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

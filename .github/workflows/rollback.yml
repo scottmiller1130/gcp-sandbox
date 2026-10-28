@@ -4,18 +4,27 @@ name: Rollback
 # No rebuild: the old revision is still deployed, so this takes seconds.
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment
+        type: choice
+        options: [prod, dev]
+        default: prod
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: deploy
+  group: release-${{ inputs.environment }}
   cancel-in-progress: false
 
 env:
+  CLOUDSDK_CORE_PROJECT: ${{ inputs.environment == 'dev' && vars.DEV_PROJECT_ID || vars.PROD_PROJECT_ID }}
+  DEPLOYER_SA: ${{ inputs.environment == 'dev' && vars.DEV_DEPLOYER_SA || vars.PROD_DEPLOYER_SA }}
   REGION: ${{ vars.GCP_REGION }}
-  SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+  SERVICE: hello-web
+  JOB: hello-web-maintenance
 
 jobs:
   rollback:
@@ -25,7 +34,7 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+          service_account: ${{ env.DEPLOYER_SA }}
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: Roll back

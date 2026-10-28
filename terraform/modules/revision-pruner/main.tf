@@ -1,32 +1,50 @@
-# Daily Cloud Run Job that deletes old revisions, triggered by Cloud Scheduler.
+# Daily Cloud Run Job that deletes old revisions of one service.
 #
 #   Cloud Scheduler --(OAuth, scheduler SA)--> Cloud Run Admin API jobs:run
-#     --> Job runs "server maintenance" as the maintenance SA
+#     --> Job runs "server maintenance" as the pruner SA
 #     --> lists/deletes revisions of the service
 #
-# Free tier: Scheduler gives 3 jobs per billing account (this is 1). The job
-# runs for a few seconds a day, well inside Cloud Run's free compute.
+# Free tier: Scheduler gives 3 jobs per *billing account*, shared by every
+# project on it. The job runs for a few seconds a day.
 
-resource "google_service_account" "maintenance" {
+terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 8.0"
+    }
+  }
+}
+
+locals {
+  job_name = "${var.service_name}-maintenance"
+}
+
+resource "google_service_account" "pruner" {
+  project      = var.project_id
   account_id   = "${var.service_name}-maint"
   display_name = "${var.service_name} maintenance job"
 }
 
 resource "google_service_account" "scheduler" {
+  project      = var.project_id
   account_id   = "${var.service_name}-scheduler"
-  display_name = "Cloud Scheduler trigger for ${var.service_name} maintenance"
+  display_name = "Cloud Scheduler trigger for ${local.job_name}"
 }
 
 # The job may manage revisions of this one service, nothing else.
-resource "google_cloud_run_v2_service_iam_member" "maintenance_prunes_revisions" {
-  name     = google_cloud_run_v2_service.app.name
-  location = google_cloud_run_v2_service.app.location
+resource "google_cloud_run_v2_service_iam_member" "pruner" {
+  project  = var.project_id
+  name     = var.service_name
+  location = var.region
   role     = "roles/run.developer"
-  member   = google_service_account.maintenance.member
+  member   = google_service_account.pruner.member
 }
 
-resource "google_cloud_run_v2_job" "maintenance" {
-  name                = "${var.service_name}-maintenance"
+resource "google_cloud_run_v2_job" "this" {
+  project             = var.project_id
+  name                = local.job_name
   location            = var.region
   deletion_protection = false
 
@@ -34,12 +52,12 @@ resource "google_cloud_run_v2_job" "maintenance" {
     task_count = 1
 
     template {
-      service_account = google_service_account.maintenance.email
+      service_account = google_service_account.pruner.email
       max_retries     = 1
       timeout         = "300s"
 
       containers {
-        image = var.bootstrap_job_image
+        image = var.bootstrap_image
         args  = ["maintenance"]
 
         env {
@@ -52,11 +70,11 @@ resource "google_cloud_run_v2_job" "maintenance" {
         }
         env {
           name  = "SERVICE"
-          value = google_cloud_run_v2_service.app.name
+          value = var.service_name
         }
         env {
           name  = "KEEP"
-          value = tostring(var.revisions_to_keep)
+          value = tostring(var.keep)
         }
 
         resources {
@@ -69,7 +87,7 @@ resource "google_cloud_run_v2_job" "maintenance" {
     }
   }
 
-  # CI keeps the job on the same image as production.
+  # CI keeps the job on the same image as the service.
   lifecycle {
     ignore_changes = [
       template[0].template[0].containers[0].image,
@@ -79,24 +97,24 @@ resource "google_cloud_run_v2_job" "maintenance" {
       client_version,
     ]
   }
-
-  depends_on = [google_project_service.enabled]
 }
 
 # The scheduler identity can start this job and do nothing else.
 resource "google_cloud_run_v2_job_iam_member" "scheduler_runs_job" {
-  name     = google_cloud_run_v2_job.maintenance.name
-  location = google_cloud_run_v2_job.maintenance.location
+  project  = var.project_id
+  name     = google_cloud_run_v2_job.this.name
+  location = google_cloud_run_v2_job.this.location
   role     = "roles/run.invoker"
   member   = google_service_account.scheduler.member
 }
 
-resource "google_cloud_scheduler_job" "maintenance" {
-  name             = "${var.service_name}-maintenance-daily"
+resource "google_cloud_scheduler_job" "this" {
+  project          = var.project_id
+  name             = "${local.job_name}-daily"
   region           = var.region
   description      = "Prune old ${var.service_name} revisions"
-  schedule         = var.maintenance_schedule
-  time_zone        = var.maintenance_time_zone
+  schedule         = var.schedule
+  time_zone        = var.time_zone
   attempt_deadline = "60s"
 
   retry_config {
@@ -105,7 +123,7 @@ resource "google_cloud_scheduler_job" "maintenance" {
 
   http_target {
     http_method = "POST"
-    uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${google_cloud_run_v2_job.maintenance.name}:run"
+    uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${google_cloud_run_v2_job.this.name}:run"
 
     oauth_token {
       service_account_email = google_service_account.scheduler.email
@@ -117,15 +135,16 @@ resource "google_cloud_scheduler_job" "maintenance" {
 }
 
 # CI updates the job's image after each release.
-resource "google_cloud_run_v2_job_iam_member" "deployer_updates_job" {
-  name     = google_cloud_run_v2_job.maintenance.name
-  location = google_cloud_run_v2_job.maintenance.location
+resource "google_cloud_run_v2_job_iam_member" "deployer" {
+  project  = var.project_id
+  name     = google_cloud_run_v2_job.this.name
+  location = google_cloud_run_v2_job.this.location
   role     = "roles/run.developer"
-  member   = google_service_account.deployer.member
+  member   = "serviceAccount:${var.deployer_email}"
 }
 
-resource "google_service_account_iam_member" "deployer_act_as_maintenance" {
-  service_account_id = google_service_account.maintenance.name
+resource "google_service_account_iam_member" "deployer_act_as_pruner" {
+  service_account_id = google_service_account.pruner.name
   role               = "roles/iam.serviceAccountUser"
-  member             = google_service_account.deployer.member
+  member             = "serviceAccount:${var.deployer_email}"
 }

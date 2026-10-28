@@ -1,0 +1,135 @@
+name: Terraform
+
+# Infrastructure as a pipeline:
+#
+#   pull request   plan platform, dev and prod (read-only identity) and post the
+#                  plans on the PR for review
+#   merge to main  apply in order: platform -> dev -> prod (stops at the first failure)
+#   Mondays        drift check: plan everything, fail if the cloud no longer
+#                  matches the code (someone changed something by hand)
+#
+# The bootstrap layer is deliberately not here: it creates CI's own identities,
+# so a human applies it.
+on:
+  pull_request:
+    paths: [terraform/**, .github/workflows/terraform.yml]
+  push:
+    branches: [main]
+    paths: [terraform/**, .github/workflows/terraform.yml]
+  schedule:
+    - cron: "0 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  plan:
+    if: github.event_name != 'push'
+    name: plan ${{ matrix.stack }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [platform, envs/dev, envs/prod]
+    defaults:
+      run:
+        working-directory: terraform/${{ matrix.stack }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.TF_PLAN_SA }}
+
+      - run: terraform init
+
+      - name: Plan
+        id: plan
+        # -lock=false: the plan identity can read state but never write it.
+        run: |
+          set +e
+          terraform plan -lock=false -no-color -detailed-exitcode -out=tfplan > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" -ne 1 ] # 0 = no changes, 2 = changes, 1 = error
+
+      - name: Summarise
+        if: always() && steps.plan.outcome != 'skipped'
+        run: |
+          {
+            echo "### ${{ matrix.stack }}"
+            grep -E '^(Plan:|No changes)' plan.txt || echo "Plan failed - see the log."
+            echo '<details><summary>Full plan</summary>'
+            echo
+            echo '```'
+            tail -c 60000 plan.txt
+            echo '```'
+            echo '</details>'
+          } > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the PR
+        if: always() && github.event_name == 'pull_request' && steps.plan.outcome != 'skipped'
+        uses: actions/github-script@v7
+        env:
+          STACK: ${{ matrix.stack }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = `<!-- terraform-plan:${process.env.STACK} -->`;
+            const body = `${marker}\n${fs.readFileSync('terraform/${{ matrix.stack }}/summary.md', 'utf8')}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find(c => c.body.startsWith(marker));
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Fail on drift
+        if: github.event_name == 'schedule' && steps.plan.outputs.exitcode == '2'
+        run: |
+          echo "::error::Drift in ${{ matrix.stack }}: the cloud no longer matches the code. Review the plan above, then fix the code or re-apply."
+          exit 1
+
+  apply:
+    if: github.event_name == 'push'
+    name: apply ${{ matrix.stack }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: terraform-apply
+      cancel-in-progress: false
+    strategy:
+      # One at a time, in this order; a failure cancels the rest.
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        stack: [platform, envs/dev, envs/prod]
+    defaults:
+      run:
+        working-directory: terraform/${{ matrix.stack }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.TF_APPLY_SA }}
+      - run: terraform init
+      - run: terraform apply -auto-approve -no-color

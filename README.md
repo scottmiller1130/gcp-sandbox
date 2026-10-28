@@ -9,7 +9,9 @@ Each folder under `labs/` is self-contained: create it, poke at it, destroy it.
 ## Apps
 
 - **[hello-web](docs/cloud-run-app.md)**: a public site on Cloud Run with CI/CD (canary, blue/green, rollback)
-  and load testing. Code in `app/`, infrastructure in `infra/`, pipelines in `.github/workflows/`.
+  and load testing, released dev → prod. Code in `app/`, pipelines in `.github/workflows/`.
+- **[Terraform layout](docs/terraform.md)**: bootstrap, platform and per-environment layers, reusable
+  modules, and plan-on-PR / apply-on-merge.
 
 ## One-time setup
 
@@ -36,7 +38,8 @@ Each folder under `labs/` is self-contained: create it, poke at it, destroy it.
 
 ## Staying free
 
-Sandbox project: **`gcp-sandbox-78tvq4`** on the **Sandbox** billing account, with a $1 budget that
+Projects: **`gcp-sandbox-78tvq4`** (shared, also used by the labs), plus `gcp-sandbox-dev-78tvq4` and
+`gcp-sandbox-prod-78tvq4` for the app. All are on the **Sandbox** billing account, with one $1 budget that
 emails at 10¢, 50¢, $1 and if spend is *forecast* to pass 10¢.
 
 The labs are built to fit the [always-free tier](https://cloud.google.com/free/docs/free-cloud-features):

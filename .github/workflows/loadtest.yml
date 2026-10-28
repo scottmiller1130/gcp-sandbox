@@ -8,6 +8,11 @@ name: Load test
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: Environment
+        type: choice
+        options: [prod, dev]
+        default: prod
       vus:
         description: Concurrent virtual users (max 200)
         default: "50"
@@ -28,9 +33,11 @@ permissions:
   id-token: write
 
 env:
-  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  CLOUDSDK_CORE_PROJECT: ${{ inputs.environment == 'dev' && vars.DEV_PROJECT_ID || vars.PROD_PROJECT_ID }}
+  DEPLOYER_SA: ${{ inputs.environment == 'dev' && vars.DEV_DEPLOYER_SA || vars.PROD_DEPLOYER_SA }}
   REGION: ${{ vars.GCP_REGION }}
-  SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+  SERVICE: hello-web
+  JOB: hello-web-maintenance
 
 jobs:
   k6:
@@ -48,7 +55,7 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+          service_account: ${{ env.DEPLOYER_SA }}
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: Resolve target URL
@@ -81,7 +88,7 @@ jobs:
           echo "Waiting for metrics to land (Cloud Monitoring lags ~2-3 min)..."
           sleep 180
           end=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          peak=$(curl -sfG "https://monitoring.googleapis.com/v3/projects/$PROJECT_ID/timeSeries" \
+          peak=$(curl -sfG "https://monitoring.googleapis.com/v3/projects/$CLOUDSDK_CORE_PROJECT/timeSeries" \
             -H "Authorization: Bearer $(gcloud auth print-access-token)" \
             --data-urlencode "filter=metric.type=\"run.googleapis.com/container/instance_count\" AND resource.labels.service_name=\"$SERVICE\"" \
             --data-urlencode "interval.startTime=${{ steps.url.outputs.start }}" \
@@ -91,7 +98,7 @@ jobs:
             --data-urlencode "aggregation.crossSeriesReducer=REDUCE_SUM" \
             | jq '[.timeSeries[]?.points[]?.value.int64Value | tonumber] | max // 0')
           {
-            echo "### Load test: ${{ inputs.vus }} VUs for ${{ inputs.duration }} on \`${{ inputs.path }}\`"
+            echo "### Load test (${{ inputs.environment }}): ${{ inputs.vus }} VUs for ${{ inputs.duration }} on \`${{ inputs.path }}\`"
             echo "- Target: ${{ steps.url.outputs.url }}"
             echo "- **Peak instances: $peak**"
             if [ -f summary.json ]; then
@@ -100,5 +107,5 @@ jobs:
                      "- Latency p50 / p95 / p99: \(.metrics.http_req_duration["p(50)"] | floor) / \(.metrics.http_req_duration["p(95)"] | floor) / \(.metrics.http_req_duration["p(99)"] | floor) ms"' summary.json
             fi
             echo
-            echo "[Cloud Run metrics](https://console.cloud.google.com/run/detail/$REGION/$SERVICE/metrics?project=$PROJECT_ID)"
+            echo "[Cloud Run metrics](https://console.cloud.google.com/run/detail/$REGION/$SERVICE/metrics?project=$CLOUDSDK_CORE_PROJECT)"
           } >> "$GITHUB_STEP_SUMMARY"

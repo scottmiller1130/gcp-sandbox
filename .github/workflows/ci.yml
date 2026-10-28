@@ -48,12 +48,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
+      - uses: terraform-linters/setup-tflint@v4
       - run: terraform fmt -check -recursive
-      - name: Validate every root module
+      - name: Validate every root and module
         run: |
-          for dir in infra labs/*/; do
+          for dir in terraform/bootstrap terraform/platform terraform/envs/*/ terraform/modules/*/ labs/*/; do
             echo "::group::$dir"
             terraform -chdir="$dir" init -backend=false -input=false
             terraform -chdir="$dir" validate
             echo "::endgroup::"
           done
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive --minimum-failure-severity=warning

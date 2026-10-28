@@ -1,0 +1,28 @@
+name: Change request
+description: Propose a change to the platform before the pull request
+labels: [change-request]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What should change, and why?
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Change type
+      options:
+        - Standard (app, docs, tooling)
+        - Infrastructure (Terraform)
+        - Security or access (IAM, identities, secrets, audit)
+        - Emergency (fix now, review within 24 hours)
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Customer impact and risk
+      description: Who notices, what could go wrong, and the fastest way back.
+    validations:
+      required: true

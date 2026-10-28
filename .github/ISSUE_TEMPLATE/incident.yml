@@ -1,0 +1,30 @@
+name: Incident
+description: Something is wrong for customers, or with security or data
+labels: [incident]
+body:
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - SEV1 - customers can't use the site, or data is lost or exposed
+        - SEV2 - degraded for customers, or a security control is down
+        - SEV3 - minor, no customer impact
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and since when?
+    validations:
+      required: true
+  - type: textarea
+    id: actions
+    attributes:
+      label: Timeline and actions taken
+      description: Times in UTC. Rollbacks, restores, rotations, who was told.
+  - type: textarea
+    id: followups
+    attributes:
+      label: Root cause and follow-ups
+      description: Fill in for the post-incident review before closing.

@@ -1,0 +1,24 @@
+name: Access request
+description: Ask for, change or remove access to GitHub or Google Cloud
+labels: [access-request]
+body:
+  - type: input
+    id: who
+    attributes:
+      label: Who (GitHub user or Google account)
+    validations:
+      required: true
+  - type: dropdown
+    id: action
+    attributes:
+      label: Request
+      options: [Grant, Change, Remove]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What access, where, and why
+      description: Least privilege - the narrowest role that does the job, and for how long.
+    validations:
+      required: true

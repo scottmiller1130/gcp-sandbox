@@ -27,7 +27,7 @@ Each folder under `labs/` is self-contained: create it, poke at it, destroy it.
    gcloud config set project $PROJECT_ID
    ```
 4. **Set a budget alert** so a forgotten VM can't surprise you:
-   Console → Billing → Budgets & alerts → create a $10 budget on this project.
+   Already done for `gcp-sandbox-78tvq4`: a $1 budget (see **Staying free** below).
 
 ## Staying free
 

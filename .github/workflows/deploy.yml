@@ -39,6 +39,12 @@ permissions:
   contents: read
   id-token: write
 
+# One release at a time: two overlapping canaries would fight over the same
+# traffic split. A later push waits for the running release, never cancels it.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest

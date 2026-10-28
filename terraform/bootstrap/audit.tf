@@ -115,6 +115,8 @@ resource "google_project_iam_member" "audit_sink_writer" {
 # --- Change ledger ----------------------------------------------------------
 
 resource "google_storage_bucket" "ledger" {
+  # checkov:skip=CKV_GCP_78:Versioning adds nothing here: the retention policy already stops any object being overwritten or deleted
+  # checkov:skip=CKV_GCP_62:Data Access audit logs on storage.googleapis.com record every read and write, with identity (stronger than access logs)
   project                     = var.shared_project_id
   name                        = "${var.shared_project_id}-ledger"
   location                    = upper(var.region)

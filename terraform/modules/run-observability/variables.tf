@@ -28,6 +28,7 @@ variable "alert_email" {
   description = "Where alerts are emailed. Empty = incidents in the console only."
   type        = string
   default     = ""
+  sensitive   = true
 }
 
 variable "enable_error_rate_alert" {

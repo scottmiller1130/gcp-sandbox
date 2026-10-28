@@ -56,9 +56,10 @@ variable "admin_token_version" {
 }
 
 variable "alert_email" {
-  description = "Where alerts are emailed. Empty = incidents in the console only."
+  description = "Where alerts are emailed. Set by CI from the ALERT_EMAIL secret (TF_VAR_alert_email); empty = incidents in the console only, and no log-based alerts."
   type        = string
   default     = ""
+  sensitive   = true
 }
 
 module "app" {

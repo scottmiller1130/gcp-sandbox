@@ -18,6 +18,9 @@ Usage:
                     [--prior verdict-or-comment] [--no-ai] [--head-sha SHA]
                     --md comment.md --verdict verdict.json
   tf_risk.py gate --verdict verdict.json --labels "a,b"
+  tf_risk.py redact plan.json     (in place: keeps only what the review needs,
+                                   with sensitive values masked, so a plan can
+                                   be shared as an artifact on a public repo)
 """
 
 from __future__ import annotations
@@ -835,6 +838,24 @@ def cmd_review(args) -> int:
     return 0
 
 
+def cmd_redact(args) -> int:
+    """Rewrite a `terraform show -json` plan keeping only resource_changes,
+    with every value Terraform marks sensitive replaced. Variables, state and
+    planned values (which hold sensitive values in plain text) are dropped."""
+    with open(args.plan) as f:
+        plan = json.load(f)
+    safe = {"format_version": plan.get("format_version"), "terraform_version": plan.get("terraform_version"),
+            "resource_changes": []}
+    for rc in plan.get("resource_changes", []):
+        ch = dict(rc.get("change", {}))
+        ch["before"] = _redact(ch.get("before"), ch.get("before_sensitive"))
+        ch["after"] = _redact(ch.get("after"), ch.get("after_sensitive"))
+        safe["resource_changes"].append({**rc, "change": ch})
+    with open(args.plan, "w") as f:
+        json.dump(safe, f)
+    return 0
+
+
 def cmd_gate(args) -> int:
     v = read_prior(args.verdict)
     if v is None:
@@ -870,8 +891,10 @@ def main(argv=None) -> int:
     g = sub.add_parser("gate")
     g.add_argument("--verdict", required=True)
     g.add_argument("--labels", default="")
+    x = sub.add_parser("redact")
+    x.add_argument("plan")
     args = p.parse_args(argv)
-    return cmd_review(args) if args.cmd == "review" else cmd_gate(args)
+    return {"review": cmd_review, "gate": cmd_gate, "redact": cmd_redact}[args.cmd](args)
 
 
 if __name__ == "__main__":

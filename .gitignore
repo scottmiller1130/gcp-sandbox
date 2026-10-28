@@ -18,3 +18,6 @@ tfplan
 
 # Saved plan output
 plan.txt
+
+# Modules are versioned by their callers; only root configs keep lock files
+terraform/modules/**/.terraform.lock.hcl

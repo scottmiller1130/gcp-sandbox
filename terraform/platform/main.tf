@@ -86,6 +86,16 @@ resource "google_artifact_registry_repository_iam_member" "env_pull" {
   member     = "serviceAccount:${each.value.run_service_agent}"
 }
 
+# Deploying an image from another project also checks that the *deployer* can
+# read it, not just the service agent that pulls it at startup.
+resource "google_artifact_registry_repository_iam_member" "deployer_read" {
+  for_each   = local.bootstrap.environments
+  repository = google_artifact_registry_repository.apps.name
+  location   = google_artifact_registry_repository.apps.location
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${each.value.deployer_email}"
+}
+
 output "repository" {
   value = "${google_artifact_registry_repository.apps.location}-docker.pkg.dev/${google_artifact_registry_repository.apps.project}/${google_artifact_registry_repository.apps.repository_id}"
 }

@@ -230,6 +230,36 @@ class EndToEnd(Base):
         self.assertIn("skipped", status)
 
 
+class ReviewReuse(Base):
+    """A review of the same commit is reused only if its AI part succeeded."""
+
+    def run_review(self, prior):
+        d = tempfile.mkdtemp()
+        plan, prior_path = os.path.join(d, "plan.json"), os.path.join(d, "prior.json")
+        with open(plan, "w") as f:
+            json.dump({"resource_changes": [rc("a", "google_monitoring_dashboard", ["update"], before={"x": 1}, after={"x": 2})]}, f)
+        with open(prior_path, "w") as f:
+            json.dump(prior, f)
+        calls = []
+        orig = tf_risk.ai_review
+        tf_risk.ai_review = lambda changes, diff: (calls.append(1), (None, "error (stub)"))[1]
+        try:
+            tf_risk.main(["review", "--plan", f"envs/prod:prod:{plan}", "--prior", prior_path, "--head-sha", "abc",
+                          "--md", os.path.join(d, "c.md"), "--verdict", os.path.join(d, "v.json")])
+        finally:
+            tf_risk.ai_review = orig
+        return len(calls)
+
+    def test_reuses_a_successful_review_of_the_same_commit(self):
+        self.assertEqual(self.run_review({"head_sha": "abc", "ai_status": "ok (claude-opus-5-5)", "changes": []}), 0)
+
+    def test_retries_when_the_earlier_ai_review_failed(self):
+        self.assertEqual(self.run_review({"head_sha": "abc", "ai_status": "error (API 401)", "changes": []}), 1)
+
+    def test_new_commit_gets_a_new_review(self):
+        self.assertEqual(self.run_review({"head_sha": "old", "ai_status": "ok (claude-opus-5-5)", "changes": []}), 1)
+
+
 class AiCall(Base):
     """ai_review against a stand-in for the Anthropic client."""
 

@@ -741,7 +741,10 @@ def cmd_review(args) -> int:
 
     overall_ai, ai_status = None, "not run"
     prior = read_prior(args.prior)
-    if prior and (args.no_ai or prior.get("head_sha") == args.head_sha):
+    # Reuse an earlier review of the same commit (e.g. when only a label changed),
+    # but only if its AI review actually succeeded - otherwise try again.
+    reusable = prior and prior.get("head_sha") == args.head_sha and str(prior.get("ai_status", "")).startswith("ok")
+    if prior and (args.no_ai or reusable):
         overall_ai, had = merge_prior(changes, prior)
         ai_status = f"reused from the pull request review ({prior.get('ai_status', '?')})" if had else "no prior review found"
     elif args.no_ai:

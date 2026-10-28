@@ -59,5 +59,6 @@ output "github_variables" {
     DEV_DEPLOYER_SA  = google_service_account.deployer["dev"].email
     PROD_PROJECT_ID  = module.projects["prod"].project_id
     PROD_DEPLOYER_SA = google_service_account.deployer["prod"].email
+    LEDGER_BUCKET    = google_storage_bucket.ledger.name
   }
 }

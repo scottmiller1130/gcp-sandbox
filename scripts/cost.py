@@ -150,7 +150,8 @@ def resources(root: str) -> list[Resource]:
     """Every resource the Terraform would create, with how many copies.
 
     Copies are estimated: a module called from both env stacks counts twice,
-    and a for_each over the environments counts once per environment."""
+    and a for_each over the environments counts once per environment. Labs
+    count once each: they share the billing account (and its free tiers)."""
     tf = os.path.join(root, "terraform")
     envs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(tf, "envs", "*")) if os.path.isdir(p))
     n_envs = max(len(envs), 1)
@@ -165,12 +166,13 @@ def resources(root: str) -> list[Resource]:
         return [Resource(t, n, where, copies * mult(b), b) for t, n, b in blocks(_read(path), "resource")]
 
     stacks = [os.path.join(tf, d) for d in ("bootstrap", "platform")] + [os.path.join(tf, "envs", e) for e in envs]
+    stacks += sorted(p for p in glob.glob(os.path.join(root, "labs", "*")) if os.path.isdir(p))
     module_calls: dict[str, int] = {}
     out: list[Resource] = []
     for stack in stacks:
         for path in sorted(glob.glob(os.path.join(stack, "*.tf"))):
             text = _read(path)
-            out += file_resources(path, 1, os.path.relpath(stack, tf))
+            out += file_resources(path, 1, os.path.relpath(stack, root))
             for _, _, body in blocks(text, "module"):
                 src = re.search(r'source\s*=\s*"([^"]+)"', body)
                 if src:
@@ -178,7 +180,7 @@ def resources(root: str) -> list[Resource]:
                     module_calls[mod] = module_calls.get(mod, 0) + mult(body)
     for mod, calls in module_calls.items():
         for path in sorted(glob.glob(os.path.join(mod, "*.tf"))):
-            out += file_resources(path, calls, os.path.relpath(mod, tf))
+            out += file_resources(path, calls, os.path.relpath(mod, root))
     return out
 
 
@@ -263,7 +265,7 @@ def firestore(m: Model) -> tuple[float | None, float | None, str]:
     writes = 2 * m.sign_cap + 2
     how = (f"{inst} instances each refreshing every {m.list_ttl / 60:g} min ({m.list_limit:g}+2 reads) and the status every "
            f"{m.status_ttl / 60:g} min, capped at {m.read_cap:g} reads/instance/day; plus {m.sign_cap:g} signatures/day "
-           f"(1 read + 2 writes each) and the nightly export")
+           f"(1 read + 2 writes each) and the nightly backup, which is incremental: it reads only entries since the last one, so at most a day's signatures")
     return reads, writes, how
 
 

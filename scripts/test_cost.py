@@ -25,6 +25,8 @@ class Base(unittest.TestCase):
             shutil.copytree(os.path.join(REPO, "terraform"), os.path.join(d, "terraform"),
                             ignore=shutil.ignore_patterns(".terraform", "*.tfstate*", ".terraform.lock.hcl"))
             shutil.copytree(os.path.join(REPO, "app"), os.path.join(d, "app"))
+            shutil.copytree(os.path.join(REPO, "labs"), os.path.join(d, "labs"),
+                            ignore=shutil.ignore_patterns(".terraform", "*.tfstate*", ".terraform.lock.hcl"))
 
     def change(self, rel, old, new):
         p = os.path.join(self.head, rel)
@@ -100,6 +102,15 @@ class UsageModel(Base):
         ms, _, risk, _ = self.assess()
         self.assertEqual(ms["scheduler"].head, 4)
         self.assertAlmostEqual(ms["scheduler"].head_usd, 0.10)
+        self.assertEqual(risk, "CRITICAL")
+
+
+class Labs(Base):
+    def test_a_lab_scheduler_job_counts_against_the_shared_free_tier(self):
+        self.append("labs/03-cloud-run/main.tf", '\nresource "google_cloud_scheduler_job" "ping" {\n  name = "ping"\n}\n'
+                    'resource "google_cloud_scheduler_job" "ping2" {\n  name = "ping2"\n}\n')
+        ms, _, risk, _ = self.assess()
+        self.assertEqual(ms["scheduler"].head, 4)
         self.assertEqual(risk, "CRITICAL")
 
 

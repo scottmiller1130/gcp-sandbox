@@ -47,6 +47,14 @@ backstop for anything the model misses.
 Everything fits. The tightest free tier is Firestore reads: about 34k of the 50k a day *at the
 absolute worst case* (prod's 10 instances all viewed non-stop for 24 hours).
 
+## What it can't see
+
+The table is a model, not a meter. It knows the drivers listed above, and it scans `terraform/` and
+`labs/` (labs share the billing account and its free tiers). A new Firestore query in another file,
+a new service or log volume won't move its numbers. That's what the AI review is for, and the $1
+budget alert backs both up. So read "no change" as "no change to the modelled drivers", not as a
+guarantee.
+
 ## Keeping it accurate
 
 Prices and free tiers live at the top of `scripts/cost.py`, with the date they were checked. Google

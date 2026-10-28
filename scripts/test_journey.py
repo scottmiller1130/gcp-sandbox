@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import journey  # noqa: E402
 
 GOOD = {
-    ("GET", "/healthz"): (200, "text/plain", b"ok\n"),
+    ("GET", "/api/info"): (200, "application/json", b'{"revision":"r1"}'),
     ("GET", "/"): (200, "text/html", b'<main id="app"></main>'),
     ("GET", "/static/app.js"): (200, "text/javascript", b"1"),
     ("GET", "/static/app.css"): (200, "text/css", b"a{}"),

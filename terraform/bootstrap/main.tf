@@ -55,12 +55,7 @@ module "projects" {
   depends_on = [google_project_service.shared]
 }
 
-# --- Terraform state bucket (created by hand before Terraform existed) ----
-
-import {
-  to = google_storage_bucket.tfstate
-  id = "gcp-sandbox-78tvq4-tfstate"
-}
+# --- Terraform state bucket (created by hand before Terraform existed; imported) ----
 
 resource "google_storage_bucket" "tfstate" {
   project                     = var.shared_project_id
@@ -90,12 +85,7 @@ resource "google_storage_bucket" "tfstate" {
   }
 }
 
-# --- Budget (created by hand earlier; now covers every sandbox project) ---
-
-import {
-  to = google_billing_budget.sandbox
-  id = "billingAccounts/01B60E-5EF416-E6C14F/budgets/8c18e023-4d3f-4192-a443-c345563fd22e"
-}
+# --- Budget (created by hand earlier and imported; now covers every sandbox project) ---
 
 resource "google_billing_budget" "sandbox" {
   billing_account = var.billing_account

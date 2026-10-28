@@ -5,9 +5,8 @@ variable "shared_project_id" {
 }
 
 variable "billing_account" {
-  description = "Billing account for new projects (the free tier is shared across all of them)"
+  description = "Billing account for new projects (the free tier is shared across all of them). Kept out of the repo: set it in terraform.tfvars (git-ignored) or TF_VAR_billing_account."
   type        = string
-  default     = "01B60E-5EF416-E6C14F"
 }
 
 variable "region" {

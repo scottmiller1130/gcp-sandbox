@@ -19,12 +19,14 @@ locals {
   host        = trimprefix(var.service_uri, "https://")
   run_filter  = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${var.service_name}\""
   by_revision = ["resource.label.revision_name"]
-  channels    = var.alert_email == "" ? [] : [google_monitoring_notification_channel.email[0].id]
-  label       = "${var.service_name} (${var.environment})"
+  # The address is sensitive; whether one is set isn't.
+  alerting = nonsensitive(var.alert_email != "")
+  channels = local.alerting ? [google_monitoring_notification_channel.email[0].id] : []
+  label    = "${var.service_name} (${var.environment})"
 }
 
 resource "google_monitoring_notification_channel" "email" {
-  count        = var.alert_email == "" ? 0 : 1
+  count        = local.alerting ? 1 : 0
   project      = var.project_id
   display_name = "${var.environment} alerts"
   type         = "email"

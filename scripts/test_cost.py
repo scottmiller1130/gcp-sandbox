@@ -56,6 +56,19 @@ class TodaysRepo(Base):
         self.assertEqual(ms["scheduler"].head, 2)  # dev + prod maintenance
         self.assertLess(ms["fs_reads"].head, cost.FREE["fs_reads"])
 
+    def test_alert_conditions_are_counted_and_priced_from_2027(self):
+        ms, _, _, _ = self.assess()
+        n = ms["alerts"].head
+        self.assertGreaterEqual(n, 4)  # uptime + 5xx, in both environments
+        self.assertEqual(ms["alerts"].head_usd, 0)  # free until ALERTING_BILLED_FROM
+        orig = cost.today
+        cost.today = lambda: "2027-09-01"
+        try:
+            ms, _, _, _ = self.assess()
+        finally:
+            cost.today = orig
+        self.assertAlmostEqual(ms["alerts"].head_usd, n * 0.35)
+
     def test_resource_copies_follow_the_environments(self):
         m = cost.load(self.head)
         self.assertEqual(m.count("google_firestore_database"), 2)

@@ -45,6 +45,25 @@ class Base(unittest.TestCase):
         return changes[0]
 
 
+class Redact(unittest.TestCase):
+    def test_sensitive_values_and_variables_are_removed(self):
+        plan = {"format_version": "1.2", "variables": {"alert_email": {"value": "me@example.com"}},
+                "planned_values": {"x": "me@example.com"}, "prior_state": {"y": "me@example.com"},
+                "resource_changes": [rc("module.o.google_monitoring_notification_channel.email[0]", "google_monitoring_notification_channel",
+                                        ["create"], after={"labels": {"email_address": "me@example.com"}, "type": "email"},
+                                        after_sensitive={"labels": {"email_address": True}})]}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(plan, f)
+        tf_risk.main(["redact", f.name])
+        with open(f.name) as g:
+            text = g.read()
+        os.unlink(f.name)
+        self.assertNotIn("me@example.com", text)
+        out = json.loads(text)
+        self.assertEqual(out["resource_changes"][0]["change"]["after"]["type"], "email")
+        self.assertEqual(set(out), {"format_version", "terraform_version", "resource_changes"})
+
+
 class CustomerDataRules(Base):
     DB = "module.data.google_firestore_database.this"
 

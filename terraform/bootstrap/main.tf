@@ -45,6 +45,8 @@ module "projects" {
     "logging.googleapis.com",
     "cloudtrace.googleapis.com",
     "clouderrorreporting.googleapis.com",
+    "firestore.googleapis.com",      # the flight log's database
+    "iamcredentials.googleapis.com", # the backup job borrows the vault writer identity
   ]
   # Cloud Run's service agent pulls images from the shared registry, so it has
   # to exist before the platform layer can grant it access.

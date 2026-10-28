@@ -38,3 +38,21 @@ variable "bootstrap_image" {
   type        = string
   default     = "us-docker.pkg.dev/cloudrun/container/job"
 }
+
+variable "backup_bucket" {
+  description = "Vault bucket for nightly backups; empty disables them"
+  type        = string
+  default     = ""
+}
+
+variable "backup_prefix" {
+  description = "This environment's folder in the vault, e.g. \"prod/\""
+  type        = string
+  default     = ""
+}
+
+variable "backup_writer" {
+  description = "Service account the job borrows to write to the vault"
+  type        = string
+  default     = ""
+}

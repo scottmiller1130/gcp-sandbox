@@ -45,6 +45,51 @@ class Base(unittest.TestCase):
         return changes[0]
 
 
+class CustomerDataRules(Base):
+    DB = "module.data.google_firestore_database.this"
+
+    def db(self, **kw):
+        return {"name": "(default)", "location_id": "nam5", "delete_protection_state": "DELETE_PROTECTION_ENABLED",
+                "deletion_policy": "ABANDON", "point_in_time_recovery_enablement": "POINT_IN_TIME_RECOVERY_DISABLED", **kw}
+
+    def test_destroying_the_database_is_critical_even_in_dev(self):
+        c = self.one([rc(self.DB, "google_firestore_database", ["delete"], before=self.db())], env="dev", stack="envs/dev")
+        self.assertEqual((c.category, c.risk), (tf_risk.DATA, "CRITICAL"))
+        self.assertNotIn("Lowered", " ".join(c.reasons))
+
+    def test_moving_the_database_is_a_replace_and_critical(self):
+        c = self.one([rc(self.DB, "google_firestore_database", ["delete", "create"], before=self.db(), after=self.db(location_id="eur3"),
+                         replace_paths=[["location_id"]])])
+        self.assertEqual(c.risk, "CRITICAL")
+        self.assertIn("location_id", " ".join(c.reasons))
+
+    def test_turning_off_delete_protection_is_critical(self):
+        c = self.one([rc(self.DB, "google_firestore_database", ["update"], before=self.db(),
+                         after=self.db(delete_protection_state="DELETE_PROTECTION_DISABLED"))])
+        self.assertEqual(c.risk, "CRITICAL")
+
+    def test_shortening_vault_retention_is_high(self):
+        b = lambda days: {"name": "gcp-sandbox-78tvq4-backups", "retention_policy": [{"retention_period": days * 86400, "is_locked": False}]}
+        c = self.one([rc("google_storage_bucket.backups", "google_storage_bucket", ["update"], before=b(90), after=b(1))], env="shared", stack="bootstrap")
+        self.assertEqual((c.category, c.risk), (tf_risk.DATA, "HIGH"))
+
+    def test_breaking_the_backup_is_high(self):
+        c = self.one([rc("module.data.google_service_account_iam_member.job_borrows_backup_writer", "google_service_account_iam_member", ["delete"],
+                         before={"role": "roles/iam.serviceAccountTokenCreator", "member": "serviceAccount:hello-web-maint@p.iam.gserviceaccount.com",
+                                 "service_account_id": "projects/p/serviceAccounts/backup-writer@p.iam.gserviceaccount.com"})])
+        self.assertEqual((c.category, c.risk), (tf_risk.DATA, "HIGH"))
+        self.assertIn("backup", c.reasons[0])
+
+    def test_cutting_the_app_off_from_its_data_is_critical(self):
+        c = self.one([rc("module.data.google_project_iam_member.app", "google_project_iam_member", ["delete"],
+                         before={"role": "roles/datastore.user", "member": "serviceAccount:hello-web-run@p.iam.gserviceaccount.com"})])
+        self.assertEqual(c.risk, "CRITICAL")
+
+    def test_creating_the_database_is_low(self):
+        c = self.one([rc(self.DB, "google_firestore_database", ["create"], after=self.db())])
+        self.assertEqual(c.risk, "LOW")
+
+
 class CustomerPathRules(Base):
     def test_removing_public_access_in_prod_is_critical(self):
         c = self.one([rc("module.app.google_cloud_run_v2_service_iam_member.public[0]", "google_cloud_run_v2_service_iam_member",

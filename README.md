@@ -10,6 +10,10 @@ Each folder under `labs/` is self-contained: create it, poke at it, destroy it.
 
 - **[hello-web](docs/cloud-run-app.md)**: a public site on Cloud Run with CI/CD (canary, blue/green, rollback)
   and load testing, released dev → prod. Code in `app/`, pipelines in `.github/workflows/`.
+- **[Customer data](docs/data.md)**: the flight log in multi-region Firestore, with free nightly backups
+  to a write-once vault and a restore drill.
+- **[Customer journey impact](docs/customer-journey.md)**: every PR is walked through the visitor's journey
+  on main and on the PR, and gets a comment on what a customer will notice.
 - **[Terraform layout](docs/terraform.md)**: bootstrap, platform and per-environment layers, reusable
   modules, and plan-on-PR / apply-on-merge.
 

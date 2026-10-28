@@ -71,9 +71,11 @@ type event struct {
 	Attrs   map[string]string `json:"attrs,omitempty"`
 }
 
-// quiet paths are counted but kept out of the feed: the page itself polls them.
-func quiet(path string) bool {
-	return path == "/api/stats" || path == "/healthz" || path == "/theme.css" || strings.HasPrefix(path, "/static/")
+// quiet requests are counted but kept out of the feed: the page itself polls them.
+func quiet(r *http.Request) bool {
+	path := r.URL.Path
+	return path == "/api/stats" || path == "/healthz" || path == "/theme.css" || strings.HasPrefix(path, "/static/") ||
+		(path == "/api/flightlog" && r.Method == http.MethodGet)
 }
 
 // displayPath makes a request path safe and short enough to show publicly.
@@ -130,7 +132,7 @@ func (a *app) observe(next http.Handler) http.Handler {
 				sw.status = http.StatusOK
 			}
 			a.countStatus(sw.status)
-			if quiet(r.URL.Path) {
+			if quiet(r) {
 				return
 			}
 			ms := float64(time.Since(start).Microseconds()) / 1000
@@ -160,7 +162,7 @@ func (a *app) countStatus(code int) {
 // remote addresses, Error Reporting payloads) only goes to Cloud Logging.
 var safeAttrs = map[string]bool{
 	"addr": true, "version": true, "revision": true, "instance": true, "error_rate": true,
-	"admin_enabled": true, "after_ms": true, "err": true, "path": true,
+	"admin_enabled": true, "after_ms": true, "err": true, "path": true, "callsign": true,
 }
 
 type teeHandler struct {

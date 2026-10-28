@@ -158,13 +158,18 @@ func (a *app) log(r *http.Request) *slog.Logger {
 // parseTraceContext reads the trace Cloud Run attaches to each request, from
 // the W3C traceparent header or Google's older X-Cloud-Trace-Context.
 func parseTraceContext(r *http.Request) (traceID, spanID string) {
+	// These headers come from the client as well as from Cloud Run, and end up
+	// in logs and on the page: accept only well-formed hex IDs.
 	// traceparent: 00-<32 hex trace id>-<16 hex span id>-<flags>
-	if p := strings.Split(r.Header.Get("traceparent"), "-"); len(p) == 4 && len(p[1]) == 32 && len(p[2]) == 16 {
+	if p := strings.Split(r.Header.Get("traceparent"), "-"); len(p) == 4 && isHex(p[1], 32) && isHex(p[2], 16) {
 		return p[1], p[2]
 	}
-	// X-Cloud-Trace-Context: <trace id>/<decimal span id>;o=1
+	// X-Cloud-Trace-Context: <32 hex trace id>/<decimal span id>;o=1
 	if v := r.Header.Get("X-Cloud-Trace-Context"); v != "" {
 		traceID, rest, _ := strings.Cut(v, "/")
+		if !isHex(traceID, 32) {
+			return "", ""
+		}
 		span, _, _ := strings.Cut(rest, ";")
 		if n, err := strconv.ParseUint(span, 10, 64); err == nil {
 			return traceID, fmt.Sprintf("%016x", n)
@@ -172,6 +177,37 @@ func parseTraceContext(r *http.Request) (traceID, spanID string) {
 		return traceID, ""
 	}
 	return "", ""
+}
+
+func isHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, c := range s {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return false
+		}
+	}
+	return true
+}
+
+// clientIP is the caller's address as Cloud Run's front end saw it: the last
+// X-Forwarded-For entry (earlier ones are whatever the client sent). Only IP
+// characters are kept, so it's safe to log.
+func clientIP(r *http.Request) string {
+	xff := r.Header.Get("X-Forwarded-For")
+	last := strings.TrimSpace(xff[strings.LastIndex(xff, ",")+1:])
+	return strings.Map(func(c rune) rune {
+		if strings.ContainsRune("0123456789abcdefABCDEF.:", c) {
+			return c
+		}
+		return -1
+	}, last[:min(len(last), 45)])
+}
+
+// logSafe strips line breaks so a request value can't fake a log line.
+func logSafe(s string) string {
+	return strings.NewReplacer("\n", "", "\r", "").Replace(s)
 }
 
 func (a *app) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -235,7 +271,7 @@ func (a *app) admin(w http.ResponseWriter, r *http.Request) {
 	// Compare hashes so the check takes the same time whatever the input length.
 	gotSum, wantSum := sha256.Sum256([]byte(got)), sha256.Sum256([]byte(a.adminToken))
 	if subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 || !isBearer {
-		a.log(r).Warn("admin: bad or missing token", "remote", r.Header.Get("X-Forwarded-For"))
+		a.log(r).Warn("admin: bad or missing token", "remote", clientIP(r))
 		w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
@@ -270,11 +306,12 @@ func (a *app) faults(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.errorRate > 0 && mrand.Float64() < a.errorRate {
 			a.injected.Add(1)
-			a.log(r).Error("injected failure on "+r.URL.Path,
-				"path", r.URL.Path,
+			path := logSafe(displayPath(r))
+			a.log(r).Error("injected failure on "+path,
+				"path", path,
 				"@type", errorReportingType,
 				"serviceContext", map[string]string{"service": a.service, "version": version},
-				"context", map[string]any{"httpRequest": map[string]any{"method": r.Method, "url": r.URL.Path, "responseStatusCode": 500}},
+				"context", map[string]any{"httpRequest": map[string]any{"method": r.Method, "url": path, "responseStatusCode": 500}},
 			)
 			writeJSON(w, http.StatusInternalServerError, struct {
 				Error string `json:"error"`

@@ -33,6 +33,14 @@ permissions:
   pull-requests: write
   actions: read # the change ledger records who approved the prod deployment
 
+# Applies queue as whole runs: one at a time, stacks in order inside a run, and
+# only the newest waiting run is kept (it applies the latest main to every
+# stack). A job-level group here cancelled queued stacks whenever a prod apply
+# sat at its approval gate, because GitHub keeps one waiting job per group.
+concurrency:
+  group: ${{ github.event_name == 'push' && 'terraform-apply' || format('terraform-{0}', github.ref) }}
+  cancel-in-progress: false
+
 env:
   TF_IN_AUTOMATION: "true"
   TF_INPUT: "false"
@@ -187,9 +195,6 @@ jobs:
     runs-on: ubuntu-latest
     # Prod's apply waits for a required reviewer (read the risk review first).
     environment: ${{ matrix.env }}
-    concurrency:
-      group: terraform-apply
-      cancel-in-progress: false
     strategy:
       # One at a time, in this order; a failure cancels the rest.
       max-parallel: 1

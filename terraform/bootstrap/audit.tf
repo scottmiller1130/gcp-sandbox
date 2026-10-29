@@ -1,8 +1,7 @@
 # Audit and evidence: what SOC 2 asks you to prove, kept where the pipelines
 # that make changes can't edit or delete it.
 #
-#   deny policy    CI's plan identity can read every project (for plans) but is
-#                  denied customer data, whatever roles it holds
+#   (CI's plan identity can't read customer data: see tf_plan_read in identity.tf)
 #   audit logs     Data Access logs for secrets, storage, impersonation and the
 #                  database, on top of Admin Activity (always on, 400 days)
 #   archive        every audit log from all three projects copied to one log
@@ -14,48 +13,20 @@ locals {
   all_project_ids = merge({ shared = var.shared_project_id }, { for k, p in module.projects : k => p.project_id })
 }
 
-# --- Deny: the plan identity never reads customer data ---------------------
-
-# Owner doesn't include managing deny policies, so the human who applies
-# bootstrap is granted it here.
-resource "google_project_iam_member" "deny_admin" {
-  for_each = module.projects
-  project  = each.value.project_id
-  role     = "roles/iam.denyAdmin"
-  member   = "user:${var.admin_email}"
-}
-
-resource "google_iam_deny_policy" "plan_reads_no_customer_data" {
-  for_each     = module.projects
-  parent       = urlencode("cloudresourcemanager.googleapis.com/projects/${each.value.project_id}")
-  name         = "plan-reads-no-customer-data"
-  display_name = "tf-plan can't read Firestore documents"
-
-  rules {
-    description = "Plans run code from any branch. roles/viewer includes datastore.entities.get/list; this takes them away."
-    deny_rule {
-      denied_principals  = ["principal://iam.googleapis.com/projects/-/serviceAccounts/${google_service_account.tf_plan.email}"]
-      denied_permissions = ["datastore.googleapis.com/entities.get", "datastore.googleapis.com/entities.list"]
-    }
-  }
-
-  depends_on = [google_project_iam_member.deny_admin]
-}
-
 # --- Data Access audit logs -------------------------------------------------
 
 locals {
   # project -> service -> log types. Admin Activity is always on and free.
   audit = {
     shared = {
-      "storage.googleapis.com"        = ["DATA_READ", "DATA_WRITE"] # state, vault, ledger buckets
-      "iamcredentials.googleapis.com" = ["DATA_READ"]               # every CI token exchange
-      "sts.googleapis.com"            = ["DATA_READ"]
+      "storage.googleapis.com" = ["DATA_READ", "DATA_WRITE"] # state, vault, ledger buckets
+      "iam.googleapis.com"     = ["DATA_READ"]               # token minting (IAM Credentials) is logged here
+      "sts.googleapis.com"     = ["DATA_READ"]
     }
     env = {
-      "secretmanager.googleapis.com"  = ["DATA_READ"]                # every secret access
-      "iamcredentials.googleapis.com" = ["DATA_READ"]                # the backup job borrowing the vault writer
-      "datastore.googleapis.com"      = ["ADMIN_READ", "DATA_WRITE"] # database settings read, every write
+      "secretmanager.googleapis.com" = ["DATA_READ"]                # every secret access
+      "iam.googleapis.com"           = ["DATA_READ"]                # token minting: the backup job borrowing the vault writer
+      "datastore.googleapis.com"     = ["ADMIN_READ", "DATA_WRITE"] # database settings read, every write
     }
   }
   audit_configs = merge(
@@ -101,7 +72,8 @@ resource "google_logging_project_sink" "audit" {
 }
 
 resource "google_project_iam_member" "audit_sink_writer" {
-  for_each = google_logging_project_sink.audit
+  # A sink into its own project's bucket has no separate writer identity.
+  for_each = { for k, sink in google_logging_project_sink.audit : k => sink if k != "shared" }
   project  = var.shared_project_id
   role     = "roles/logging.bucketWriter"
   member   = each.value.writer_identity

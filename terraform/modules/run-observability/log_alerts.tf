@@ -24,12 +24,6 @@ locals {
       filter   = "logName:\"cloudaudit.googleapis.com%2Factivity\" AND protoPayload.authenticationInfo.principalEmail:* AND NOT protoPayload.authenticationInfo.principalEmail:\"gserviceaccount.com\""
       doc      = "A person (not CI or a service) changed something in this project directly. Expected when applying the bootstrap layer; otherwise find who and what in the audit log entry, and make sure the change is captured in a PR (the weekly drift check will flag anything Terraform manages)."
     }
-    denied = {
-      name     = "${local.label}: access blocked by a deny policy"
-      severity = "WARNING"
-      filter   = "logName:\"cloudaudit.googleapis.com%2Fpolicy\""
-      doc      = "Something tried to use a permission a deny policy forbids, such as the plan identity reading customer data. Look at the PR or workflow that ran at the time."
-    }
   }
 }
 

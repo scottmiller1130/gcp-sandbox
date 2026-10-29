@@ -1,7 +1,7 @@
 # Incident response policy
 
 **Detect.** Uptime checks and alerts (site down, 5xx rate, failed backup or restore drill, failed
-`/admin` logins, changes outside the pipeline, deny-policy hits) email the owner. GitHub security
+`/admin` logins, changes outside the pipeline) email the owner. GitHub security
 alerts (code scanning, Dependabot, secret scanning) and private vulnerability reports also count.
 
 **Respond.**

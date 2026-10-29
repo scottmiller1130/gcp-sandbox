@@ -46,12 +46,6 @@ locals {
   pool            = google_iam_workload_identity_pool.github.name
   from_any_branch = "principalSet://iam.googleapis.com/${local.pool}/attribute.repository_id/${var.github_repository_id}"
   from_main       = "principalSet://iam.googleapis.com/${local.pool}/attribute.repo_ref/${var.github_repository_id}:refs/heads/main"
-
-  # name -> project id, for the workload projects plus the shared one
-  all_projects = merge(
-    { shared = var.shared_project_id },
-    { for k, p in module.projects : k => p.project_id },
-  )
 }
 
 # --- Terraform: plan (read-only, PRs) -------------------------------------

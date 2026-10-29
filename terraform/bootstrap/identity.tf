@@ -72,12 +72,13 @@ resource "google_service_account_iam_member" "tf_plan_wif" {
 # customer data. In the shared project (state, registry, vault metadata)
 # roles/viewer is fine. In dev and prod it would include reading Firestore
 # documents, so it gets only what the env stacks' resources need to be read.
+# Not roles/iam.securityReviewer either: it includes datastore.entities.list.
+# The IAM policies Terraform reads are covered by the roles below.
 # (Deny policies would be simpler, but need a Google Cloud organization.)
 locals {
   tf_plan_env_roles = [
-    "roles/iam.securityReviewer",            # every IAM policy
-    "roles/browser",                         # the project itself
-    "roles/run.viewer",                      # services, jobs
+    "roles/browser",                         # the project and its IAM policy
+    "roles/run.viewer",                      # services, jobs and their IAM policies
     "roles/monitoring.viewer",               # uptime, alerts, SLOs, dashboards
     "roles/secretmanager.viewer",            # secret metadata, never values
     "roles/cloudscheduler.viewer",           # the maintenance trigger

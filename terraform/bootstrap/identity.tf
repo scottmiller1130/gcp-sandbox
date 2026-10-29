@@ -68,10 +68,45 @@ resource "google_service_account_iam_member" "tf_plan_wif" {
   member             = local.from_any_branch
 }
 
+# Plans run code from any branch, so this identity must not be able to read
+# customer data. In the shared project (state, registry, vault metadata)
+# roles/viewer is fine. In dev and prod it would include reading Firestore
+# documents, so it gets only what the env stacks' resources need to be read.
+# (Deny policies would be simpler, but need a Google Cloud organization.)
+locals {
+  tf_plan_env_roles = [
+    "roles/iam.securityReviewer",            # every IAM policy
+    "roles/browser",                         # the project itself
+    "roles/run.viewer",                      # services, jobs
+    "roles/monitoring.viewer",               # uptime, alerts, SLOs, dashboards
+    "roles/secretmanager.viewer",            # secret metadata, never values
+    "roles/cloudscheduler.viewer",           # the maintenance trigger
+    "roles/iam.serviceAccountViewer",        # service accounts
+    "roles/serviceusage.serviceUsageViewer", # enabled APIs
+  ]
+  tf_plan_bindings = merge(
+    { for r in ["roles/viewer", "roles/iam.securityReviewer"] : "shared/${r}" => { project = var.shared_project_id, role = r } },
+    merge([for k, p in module.projects : merge(
+      { for r in local.tf_plan_env_roles : "${k}/${r}" => { project = p.project_id, role = r } },
+      { "${k}/firestoreMetadataReader" = { project = p.project_id, role = google_project_iam_custom_role.firestore_metadata[k].id } },
+    )]...),
+  )
+}
+
+# The database's settings (location, delete protection), not its documents.
+resource "google_project_iam_custom_role" "firestore_metadata" {
+  for_each    = module.projects
+  project     = each.value.project_id
+  role_id     = "firestoreMetadataReader"
+  title       = "Firestore metadata reader"
+  description = "Read Firestore database settings; no access to documents. For CI plans."
+  permissions = ["datastore.databases.get", "datastore.databases.getMetadata", "datastore.databases.list", "datastore.locations.get", "datastore.locations.list"]
+}
+
 resource "google_project_iam_member" "tf_plan_read" {
-  for_each = { for pair in setproduct(keys(local.all_projects), ["roles/viewer", "roles/iam.securityReviewer"]) : "${pair[0]}/${pair[1]}" => pair }
-  project  = local.all_projects[each.value[0]]
-  role     = each.value[1]
+  for_each = local.tf_plan_bindings
+  project  = each.value.project
+  role     = each.value.role
   member   = google_service_account.tf_plan.member
 }
 

@@ -10,7 +10,7 @@ recorded.
 | Deploy / apply to prod | `prod` environment: approval by the owner | Deployment approvals, change ledger |
 | Google Cloud, CI | Keyless Workload Identity Federation pinned to this repo's ID; apply and deploy only from `main` | `terraform/bootstrap/identity.tf` |
 | Google Cloud, humans | Owner's Google account with 2-step verification (security key) | Google account settings |
-| Customer data | The app's runtime identity and the backup job only; the plan identity is denied by an IAM deny policy | `terraform/bootstrap/audit.tf` |
+| Customer data | The app's runtime identity and the backup job only; CI's plan identity holds only narrow read roles in dev and prod, none of which can read documents | `terraform/bootstrap/identity.tf` |
 
 **Requests:** open an [access request](../../.github/ISSUE_TEMPLATE/access-request.yml) issue. The owner
 approves by changing the Terraform in a PR (bootstrap for identities), so the grant is reviewed,

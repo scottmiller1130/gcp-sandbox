@@ -73,6 +73,27 @@ jobs:
       - name: Risk engine, customer journey, cost and ledger tests
         run: python -W error::ResourceWarning -m unittest -v scripts/test_tf_risk.py scripts/test_journey.py scripts/test_cost.py scripts/test_ledger.py
 
+  # The agentic workflows run from the compiled .lock.yml files, so a review of
+  # the .md must be a review of what runs: recompile and fail on any difference.
+  agentic-workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Lock files match their sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh extension install github/gh-aw --pin v1.0.1
+          gh aw compile --strict
+          if [ -n "$(git status --porcelain -- .github/workflows)" ]; then
+            git status --short -- .github/workflows
+            echo "::error::A .lock.yml is out of date: run 'gh aw compile' and commit the result."
+            exit 1
+          fi
+
   terraform:
     runs-on: ubuntu-latest
     steps:

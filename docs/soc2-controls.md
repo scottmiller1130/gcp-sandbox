@@ -9,19 +9,19 @@ auditor finds the evidence**. Policies: [docs/policies](policies/README.md). Aud
 | TSC | Control | Evidence |
 |---|---|---|
 | CC1.1–1.5 Control environment | Written policies with an owner, reviewed yearly | `docs/policies/` and its git history |
-| CC2.1 Information for controls | Every change carries machine-generated risk, journey and cost reviews | PR comments: Terraform change review, Customer journey impact, Cost impact |
+| CC2.1 Information for controls | Every change carries machine-generated risk, journey and cost reviews; a weekly check that these documents match the code | PR comments: Terraform change review, Customer journey impact, Cost impact; `[docs drift]` issues |
 | CC3.1–3.4 Risk assessment | Risk register with treatments and accepted risks | `docs/policies/risk-assessment.md` |
-| CC4.1 Monitoring of controls | OpenSSF Scorecard weekly; daily drift check; restore drill nightly | Scorecard badge and Security tab; Terraform workflow runs; `meta/backup` |
+| CC4.1 Monitoring of controls | OpenSSF Scorecard weekly; daily drift check; restore drill nightly; daily operations digest reviewed by the owner | Scorecard badge and Security tab; Terraform workflow runs; `meta/backup`; `[ops digest]` issues |
 | CC5.2 Technology controls | Required checks on `main`: tests, CodeQL, scanners, risk / journey / cost gates | Branch protection settings; check runs on each PR |
 | CC6.1 Logical access | Keyless CI pinned to the repo ID; one identity per job; the plan identity can't read customer data (narrow read roles, no `roles/viewer` in dev/prod); no service account keys | `terraform/bootstrap/identity.tf`, `audit.tf`; `gcloud iam service-accounts keys list` (empty) |
 | CC6.2 Access provisioning | Access requests via issue, granted through a reviewed PR | `access-request` issues; bootstrap PRs |
-| CC6.3 Access removal and review | Quarterly access review | Closed `access-review` issues |
+| CC6.3 Access removal and review | Quarterly access review, drafted by the `access-review` workflow from the live GitHub and IAM grants; the owner confirms or revokes each and closes the issue | Closed `access-review` issues |
 | CC6.6 Boundary protection | HTTPS only, TLS 1.2+, HSTS, strict CSP; ingress only via Google's front end | `curl`/`openssl` checks in `docs/security.md`; `app/main.go` headers |
 | CC6.7 Data in transit | TLS for every hop; secrets only in Secret Manager / GitHub secrets | `app/gcp.go`; push protection, gitleaks |
 | CC6.8 Malicious software | Distroless non-root image, Trivy scan, build provenance verified before deploy, pinned actions, Harden-Runner | CI and Deploy runs; `gh attestation verify` |
 | CC7.1 Vulnerability detection | CodeQL, Dependabot, Trivy, checkov, govulncheck, Scorecard | Security tab; Dependabot PRs |
 | CC7.2 Anomaly monitoring | Uptime and error alerts; alerts for failed backups, failed admin logins, human changes; Data Access audit logs | Alert policies; `audit-archive` log bucket (400 days) |
-| CC7.3–7.5 Incident response | Incident issues with severity, timeline, root cause; rollback without approval | `incident` issues; Rollback runs; `docs/policies/incident-response.md` |
+| CC7.3–7.5 Incident response | Incident issues with severity, timeline, root cause; rollback without approval; failed runs diagnosed automatically (`ci-doctor`) | `incident` issues; Rollback runs; `docs/policies/incident-response.md` |
 | CC8.1 Change management | PR + approval by a non-author code owner; `prod` approvals; emergency path with 24-hour post-merge review; change ledger | PR reviews; deployment approvals; `post-merge-review` issues; `gs://…-ledger` + `scripts/ledger.py verify`; GitHub Releases |
 | CC9.2 Vendor risk | Vendor register with what each can see | `docs/policies/vendor-management.md` |
 

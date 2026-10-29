@@ -7,6 +7,7 @@ Reviewed yearly, and whenever the architecture changes. Likelihood and impact: L
 | A bad change breaks the site | M | H | Reviews, journey walk, canary with automatic rollback |
 | Customer data lost or corrupted | L | H | Multi-region, delete protection, nightly backup and drill, restore |
 | CI or supply chain compromised | L | H | Pinned actions, Harden-Runner, provenance verified before deploy, keyless and least-privilege CI, a plan identity that can't read customer data |
+| An AI agent is steered by injected text (PR, log, release notes) | M | L | Agents are read-only and can only request a comment or issue, within limits, after threat detection; trusted triggers only; no blocking gate depends on them |
 | A secret leaks | L | M | Push protection, gitleaks, Secret Manager, rotation |
 | Unauthorised or unreviewed change | L | H | Branch protection, prod approvals, merge audit, ledger, out-of-band change alert |
 | Owner's account compromised | L | H | Security-key 2SV; alerts on human changes |

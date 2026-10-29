@@ -55,8 +55,39 @@ Status: ✅ in place · 🔧 in progress · 📋 decision or document needed.
 | `gcp-sandbox-claude-78tvq4[bot]` (GitHub App; Claude Code) | push branches, open PRs (1-hour tokens, this repo only) | approve, merge, change settings, reach other repos |
 | Code owner (@scottmiller1130) | approve and merge PRs, approve `prod` | push to `main` directly (protected) |
 | CI identities | plan (read-only), apply and deploy from `main` only | act from a branch, change the bootstrap layer |
+| Agentic workflows (Claude, via GitHub Agentic Workflows) | read the repo, runs and logs; request a comment or an issue | push, open PRs, approve, merge, deploy, change settings, see the API key |
 
 Rollback is a **pre-approved standard change**: it doesn't wait for the `prod` reviewer, so an incident is never blocked on a click.
+
+## Agentic workflows
+
+Five [GitHub Agentic Workflows](https://github.github.com/gh-aw/) run Claude as an **advisor**: it
+reads, and asks for a comment or an issue; it never changes anything, and none of them is a
+required check. The blocking gates stay deterministic.
+
+| Workflow | When | Output | Control |
+|---|---|---|---|
+| `upgrade-review` | daily, and on demand | a comment on each Dependabot PR: what changed upstream, what it touches here, a risk call | CC7.1, CC8.1 |
+| `ci-doctor` | a pipeline run fails | the root cause and the fix, on the PR (or an issue for `main`) | CC7.3 |
+| `ops-digest` | daily | one `[ops digest]` issue: what needs the owner, what shipped, health, open work | CC4.1, CC7.2 |
+| `access-review` | quarterly (2 Jan, Apr, Jul, Oct) | a draft `[access review]` issue with every GitHub and Google Cloud grant to confirm; closing it is the sign-off | CC6.2, CC6.3 |
+| `docs-drift` | weekly | an issue listing every place these documents no longer match the code | CC2.1, CC4.1 |
+
+How they're contained:
+- **Read-only agent.** The agent job has only read permissions. Writes are *requested*, then made by
+  a separate job, within limits set in each workflow (which output, how many, title prefix, labels),
+  after a threat-detection pass on the request.
+- **Secrets stay out of reach.** The agent runs in a container behind a network firewall; the
+  Anthropic key and the OIDC request token are excluded from its environment.
+- **Google Cloud, read-only and before the agent.** Only `access-review` touches Google Cloud: a
+  setup step signs in as the plan identity (which can't read customer data), saves the IAM policies,
+  then revokes and deletes the credentials before the agent starts.
+- **Trusted triggers only.** Schedules, manual runs and our own workflow runs, never issue or
+  comment text from the public. Every prompt treats PR text, logs and release notes as untrusted.
+- **Reviewed as compiled.** Each `.md` compiles to a `.lock.yml` (every action and container pinned
+  by digest). CI recompiles and fails if they differ, so the reviewed `.md` is what runs.
+- **Harden-Runner** isn't added to these jobs: gh-aw has its own egress firewall, and its lock files
+  are generated.
 
 ## Change management: how a change is tracked, approved and logged
 

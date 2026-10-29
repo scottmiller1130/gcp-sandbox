@@ -14,9 +14,12 @@ on:
 permissions:
   contents: read
   id-token: write
+  actions: write # to stop a release that's in flight
 
+# Rollback never queues behind a release (one parked at the prod approval gate
+# would otherwise hold it): it has its own group, and stops releases first.
 concurrency:
-  group: release-${{ inputs.environment }}
+  group: rollback-${{ inputs.environment }}
   cancel-in-progress: false
 
 env:
@@ -39,6 +42,18 @@ jobs:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ env.DEPLOYER_SA }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+
+      # An in-flight Deploy could keep shifting traffic after we roll back.
+      - name: Stop any release in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for status in in_progress waiting queued pending; do
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml --status "$status" --json databaseId -q '.[].databaseId'
+          done | sort -u | while read -r id; do
+            echo "Stopping Deploy run $id"
+            gh run cancel "$id" --repo "$GITHUB_REPOSITORY" || true
+          done
 
       - name: Roll back
         run: |

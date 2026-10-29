@@ -19,7 +19,11 @@ manual changes to production, and nothing is pushed directly to `main`.
    fires when a person changes a project directly.
 
 **Standard pre-approved changes:** rollback to the previous revision (the Rollback workflow) needs no
-approval, so an incident is never blocked.
+approval and never waits behind a release: it stops any release in flight first, so an incident is
+never blocked.
+
+**Pending prod approvals:** decide each one (approve or reject) the same day. A release or apply
+parked at the `prod` gate holds the queue, and later ones wait behind it.
 
 **Emergency changes:** label the PR `emergency`. The owner may merge ahead of review (an admin
 bypass, recorded by GitHub). The merge audit workflow opens a post-merge review issue that must be
